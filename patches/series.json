@@ -2,10 +2,10 @@
   "omarchy": [],
   "omarchy-iso": [
     "0001-build-inputs.patch",
-    "0002-local-packages.patch"
+    "0002-local-packages.patch",
+    "0003-builder-source-ownership.patch"
   ],
   "omarchy-pkgs": [
     "0001-pinned-nvim-source.patch"
   ]
 }
-

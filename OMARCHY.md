@@ -43,6 +43,8 @@ python3 scripts/prepare-sources.py
 
 The preparation script clones the linked sources as standalone repositories with real `.git` directories. This is deliberate: Omarchy's dev PKGBUILDs copy the source directory, including Git metadata, into their build directory to calculate the package version. A conventional submodule `.git` pointer would point outside that copied directory. The nested Archiso dependency uses its official GitHub mirror at the exact commit recorded by the ISO source.
 
+Inside the build container, root first copies the read-only Omarchy source into a temporary directory and transfers ownership of that copy to the unprivileged package builder. This preserves owner-only Git metadata such as partial-clone `.promisor` files, while leaving the host checkout's ownership and permissions unchanged. Both dev PKGBUILDs use this staged source through `OMARCHY_SRC`.
+
 The script preserves local source changes on the pinned HEAD. It refuses to reset an existing different HEAD or delete an existing source directory. Overlays explicitly replace their corresponding target files. Repeating the command reports already-applied patches; an incompatible patch fails visibly.
 
 ## Keep custom changes in this repository

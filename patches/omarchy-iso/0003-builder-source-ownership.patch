@@ -1,0 +1,27 @@
+diff --git a/builder/build-omarchy-packages.sh b/builder/build-omarchy-packages.sh
+--- a/builder/build-omarchy-packages.sh
++++ b/builder/build-omarchy-packages.sh
+@@ -29,6 +29,14 @@
+ echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/99-omarchy-pkg-builder
+ chmod 440 /etc/sudoers.d/99-omarchy-pkg-builder
+ chown builder:builder "$work_dir"
++
++# The read-only host checkout can contain owner-only Git files (for example
++# partial-clone .promisor markers). Stage it as root, then give only the
++# container-local copy to builder; preserve source modes and Git history.
++source_work="$work_dir/.omarchy-source"
++mkdir -p "$source_work"
++cp -a /omarchy-source/. "$source_work/"
++chown -R builder:builder "$source_work"
+ 
+ pacman -Sy --noconfirm
+ 
+@@ -67,7 +75,7 @@
+   su builder -c "
+     cd '$pkg_work' &&
+     PKGDEST='$work_dir' \
+-    OMARCHY_SRC=/omarchy-source \
++    OMARCHY_SRC='$source_work' \
+     makepkg --noconfirm --skippgpcheck --skipchecksums --nodeps -f
+   "
+   # Only explicitly selected library providers are installed into the builder.
