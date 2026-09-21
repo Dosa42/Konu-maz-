@@ -21,10 +21,7 @@ diff --git a/pkgbuilds/omarchy-nvim/PKGBUILD b/pkgbuilds/omarchy-nvim/PKGBUILD
    rm -rf "$XDG_CONFIG_HOME/nvim/.git"
  
    # Copy our custom configs
-@@ -37,7 +37,7 @@
-   echo "Installing LazyVim plugins..."
-   nvim --headless \
-     "+Lazy! sync" \
+@@ -40,4 +40,4 @@
 -    "+qa!" || true
 +    "+qa!"
  

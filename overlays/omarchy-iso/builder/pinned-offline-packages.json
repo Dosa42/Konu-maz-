@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "packages": [
+    {
+      "name": "apple-bcm-firmware",
+      "version": "14.0-1",
+      "arch": "any",
+      "filename": "apple-bcm-firmware-14.0-1-any.pkg.tar.zst",
+      "url": "https://github.com/NoaHimesaka1873/arch-mact2-mirror/releases/download/release/apple-bcm-firmware-14.0-1-any.pkg.tar.zst",
+      "sha256": "f2cd47d9e3fb9658f16997b2d9ace3033b57925b8c6ddd86ccc3d07d0c3e9559"
+    }
+  ]
+}

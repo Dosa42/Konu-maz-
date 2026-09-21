@@ -1,0 +1,24 @@
+diff --git a/pkgbuilds/omarchy-nvim/PKGBUILD b/pkgbuilds/omarchy-nvim/PKGBUILD
+--- a/pkgbuilds/omarchy-nvim/PKGBUILD
++++ b/pkgbuilds/omarchy-nvim/PKGBUILD
+@@ -37,6 +37,6 @@ build() {
+   echo "Installing LazyVim plugins..."
+-  nvim --headless \
+-    "+Lazy! sync" \
++  OMARCHY_NVIM_BUILD="$startdir/build-plugin-cache.lua" nvim --headless \
++    "+lua local ok, err = pcall(dofile, vim.env.OMARCHY_NVIM_BUILD); if not ok then io.stderr:write(tostring(err), '\\n'); vim.cmd('cquit 1') end" \
+     "+qa!"
+ 
+   echo "Slimming plugin repos..."
+diff --git a/pkgbuilds/omarchy-nvim/lua/plugins/all-themes.lua b/pkgbuilds/omarchy-nvim/lua/plugins/all-themes.lua
+--- a/pkgbuilds/omarchy-nvim/lua/plugins/all-themes.lua
++++ b/pkgbuilds/omarchy-nvim/lua/plugins/all-themes.lua
+@@ -77,7 +77,7 @@ return {
+ 		priority = 1000,
+ 	},
+ 	{
+-		"gthelding/monokai-pro.nvim",
++		"loctvl842/monokai-pro.nvim",
+ 		lazy = true,
+ 		priority = 1000,
+ 	},

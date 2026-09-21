@@ -3,9 +3,11 @@
   "omarchy-iso": [
     "0001-build-inputs.patch",
     "0002-local-packages.patch",
-    "0003-builder-source-ownership.patch"
+    "0003-builder-source-ownership.patch",
+    "0004-pinned-offline-firmware.patch"
   ],
   "omarchy-pkgs": [
-    "0001-pinned-nvim-source.patch"
+    "0001-pinned-nvim-source.patch",
+    "0002-validated-plugin-sync.patch"
   ]
 }

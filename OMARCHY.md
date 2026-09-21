@@ -13,6 +13,7 @@ The job uses an Ubuntu 24.04 x86_64 runner, a privileged Arch Linux container pi
 Artifacts retained for seven days:
 
 - `omarchy-custom-development-iso-*`: ISO, SHA256, El Torito boot catalogue, build manifest, builder image identity, and selected package inventories.
+- `pinned-offline-packages.json` inside the ISO artifact records explicitly pinned upstream archives, their verified checksums, identity and dependencies.
 - `omarchy-effective-sources-*`: actual checked-out source files after patches/overlays, when selected. Git object stores are omitted; use the repository and preparation script to reconstruct buildable clones.
 - `omarchy-build-logs-*`: host setup, complete build output, exact source identities and applied diffs, including on failure.
 
@@ -52,6 +53,16 @@ The script preserves local source changes on the pinned HEAD. It refuses to rese
 For an existing source file, edit its local checkout and save the incremental diff as an additional patch under `patches/<source>/`. Add its filename to that source's ordered array in `patches/series.json`. Do not save a second patch that repeats changes already present in an earlier patch. New files can be placed directly under `overlays/<source>/` at their required source-relative path. GitHub Actions only receives tracked changes; local uncommitted edits inside a source checkout are not transferred by pushing the build repository alone.
 
 The supplied patches make the builder accept immutable image/Node inputs and unique output directories, use a pinned LazyVim starter revision, propagate a failed Neovim build command, identify the ISO as a development build, and integrate additional local packages. They do not replace the authentication system.
+
+### Firmware removed from an upstream package index
+
+The arch-mact2 package index no longer contains `apple-bcm-firmware`, which this pinned Omarchy source still requires for T2 Macs. The maintainer still publishes the original `14.0-1` archive. `overlays/omarchy-iso/builder/pinned-offline-packages.json` pins that exact HTTPS download and SHA-256. The builder verifies the bytes and `.PKGINFO`, adds the archive to the offline mirror, resolves its declared dependencies, excludes its name from online downloads, and retains its exact output during pruning. Firmware remains available offline; no macOS-dependent fetcher is substituted. An unavailable or mismatched pinned archive fails visibly.
+
+Upstream evidence: [maintainer release](https://github.com/NoaHimesaka1873/arch-mact2-mirror/releases/tag/release), [new fetcher introduction](https://github.com/NoaHimesaka1873/arch-mact2-PKGBUILDs/commit/019d2f2516d36c14f3330384d25fa9f8c8e71c43).
+
+### Neovim plugin cache
+
+The Ristretto/Monokai plugin now comes from its available upstream `loctvl842/monokai-pro.nvim`; the previously configured `gthelding` repository returned an authentication error. The package runs a synchronous Lazy sync and checks missing plugins, failed tasks and Neovim errors before packaging. A failed plugin download now returns a failing build status instead of allowing `:qa!` to report success with an incomplete cache.
 
 ## Add an actual local signer package
 

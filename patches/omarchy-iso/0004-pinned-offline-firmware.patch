@@ -1,0 +1,22 @@
+diff --git a/builder/build-iso.sh b/builder/build-iso.sh
+--- a/builder/build-iso.sh
++++ b/builder/build-iso.sh
+@@ -102,6 +102,18 @@
+     fi
+   } > "$build_cache_dir/airootfs/usr/share/omarchy-iso/build-info"
+ fi
++
++# Some hardware firmware has left its repository index while the maintainer
++# still publishes the original archive. Keep that exact firmware in the offline
++# image; do not replace it with a tool requiring macOS on the target machine.
++python3 /builder/stage-pinned-packages.py /builder/pinned-offline-packages.json \
++  "$offline_mirror_dir" /out/pinned-offline-packages.json
++pinned_package_names=$(jq -r '.packages[].name' /out/pinned-offline-packages.json)
++while IFS= read -r pinned_package_name; do
++  [[ -n $pinned_package_name ]] || continue
++  # Use the same dependency, online-exclusion and pruning rules as local outputs.
++  LOCAL_BUILD_PACKAGES+=("$pinned_package_name")
++done <<< "$pinned_package_names"
+ 
+ # When --local-source is in effect, build omarchy* from the mounted source
+ # trees and drop them in the offline mirror. Otherwise pacman -Syw below

@@ -43,7 +43,7 @@ def main():
         'verification': {'iso_created': True, 'el_torito_catalog_read': True, 'vm_boot_tested': False, 'usb_signer_tested': False},
         'reproducibility': 'Source/image/Node pins recorded; Arch/Omarchy mirrors and LazyVim plugin resolution remain network-resolved.',
     }
-    for name in ('builder-image.json', 'offline-packages.txt', 'build-environment-packages.txt', 'node-dist.sha256', 'boot-catalog.txt'):
+    for name in ('builder-image.json', 'offline-packages.txt', 'pinned-offline-packages.json', 'build-environment-packages.txt', 'node-dist.sha256', 'boot-catalog.txt'):
         path = iso.parent / name
         if not path.is_file():
             raise FileNotFoundError(f'Missing build evidence: {path}')
