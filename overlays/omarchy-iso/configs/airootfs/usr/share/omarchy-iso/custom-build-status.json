@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "profile": "custom-development",
+  "authentication": "upstream-unmodified",
+  "usb_signer_integration": "pending-real-device-protocol-and-pam-adapter",
+  "description": "This build environment does not yet implement USB-signer-only authentication."
+}
+

@@ -1,0 +1,4 @@
+# Additional local package names, in build order.
+# Recipes belong in overlays/omarchy-pkgs/pkgbuilds/<name>/.
+# Listed packages are built locally and installed in BOTH the live ISO and target.
+

@@ -1,0 +1,32 @@
+diff --git a/pkgbuilds/omarchy-nvim/PKGBUILD b/pkgbuilds/omarchy-nvim/PKGBUILD
+--- a/pkgbuilds/omarchy-nvim/PKGBUILD
++++ b/pkgbuilds/omarchy-nvim/PKGBUILD
+@@ -10,8 +10,8 @@
+ makedepends=('git' 'nodejs' 'npm' 'tree-sitter-cli')
+ conflicts=('omarchy-lazyvim')
+ options=('!debug')
+-source=("https://github.com/LazyVim/starter/archive/refs/heads/main.tar.gz")
+-sha256sums=('d865d50211358358d3c3c1e356773c1e3de1e8964215d85eb1b4c77521e17488')
++source=("starter::git+https://github.com/LazyVim/starter.git#commit=803bc181d7c0d6d5eeba9274d9be49b287294d99")
++sha256sums=('SKIP')
+ 
+ build() {
+   cd "$srcdir"
+@@ -26,7 +26,7 @@
+   mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
+ 
+   # Setup LazyVim starter
+-  cp -r "$srcdir/starter-main" "$XDG_CONFIG_HOME/nvim"
++  cp -r "$srcdir/starter" "$XDG_CONFIG_HOME/nvim"
+   rm -rf "$XDG_CONFIG_HOME/nvim/.git"
+ 
+   # Copy our custom configs
+@@ -37,7 +37,7 @@
+   echo "Installing LazyVim plugins..."
+   nvim --headless \
+     "+Lazy! sync" \
+-    "+qa!" || true
++    "+qa!"
+ 
+   echo "Slimming plugin repos..."
+   slim_lazy_repos "$XDG_DATA_HOME/nvim"

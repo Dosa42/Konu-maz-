@@ -1,0 +1,4 @@
+# Optional local library packages required while compiling later local packages.
+# Each name must also be in custom-local.packages and precede its consumers.
+# Listed providers are installed into the builder immediately after compilation.
+# Leave final authentication-policy packages out of this builder-only list.

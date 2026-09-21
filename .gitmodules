@@ -1,0 +1,12 @@
+[submodule "sources/omarchy"]
+  path = sources/omarchy
+  url = https://github.com/omacom/omarchy.git
+
+[submodule "sources/omarchy-iso"]
+  path = sources/omarchy-iso
+  url = https://github.com/omacom/omarchy-iso.git
+
+[submodule "sources/omarchy-pkgs"]
+  path = sources/omarchy-pkgs
+  url = https://github.com/omacom/omarchy-pkgs.git
+

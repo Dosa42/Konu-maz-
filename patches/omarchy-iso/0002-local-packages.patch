@@ -1,0 +1,147 @@
+diff --git a/builder/build-iso.sh b/builder/build-iso.sh
+--- a/builder/build-iso.sh
++++ b/builder/build-iso.sh
+@@ -23,6 +23,8 @@
+ esac
+ : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
+ export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
++source /builder/custom-packages.sh
++LOCAL_BUILD_PACKAGES=("$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE" "${CUSTOM_LOCAL_PACKAGES[@]}")
+ 
+ # Packages installed into the Arch container used to build the ISO.
+ pacman-key --init
+@@ -47,6 +49,10 @@
+ # only build deps like limine-snapper-sync and limine-mkinitcpio-hook.
+ if ! grep -q '^\[omarchy\]' /etc/pacman.conf; then
+   awk '/^\[omarchy\]/,/^$/' /configs/pacman-online-${OMARCHY_MIRROR}.conf >> /etc/pacman.conf
++fi
++
++if ((${#CUSTOM_BUILD_DEPENDENCIES[@]})); then
++  pacman --noconfirm -S --needed "${CUSTOM_BUILD_DEPENDENCIES[@]}"
+ fi
+ 
+ # Build locations
+@@ -122,6 +128,7 @@
+ # drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
+ # live initramfs.
+ arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
++arch_packages+=("${CUSTOM_LOCAL_PACKAGES[@]}")
+ printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
+ 
+ # The live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
+@@ -170,6 +177,9 @@
+ mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
+ cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+ cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
++if ((${#CUSTOM_LOCAL_PACKAGES[@]})); then
++  printf '%s\n' "${CUSTOM_LOCAL_PACKAGES[@]}" >> "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
++fi
+ 
+ # The configurator's setup form comes from the runtime this ISO bundles, so the
+ # installer and the first-boot setup that finishes a deferred install can never
+@@ -190,11 +200,31 @@
+ fi
+ cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
+ 
++# Resolve runtime dependencies from the actual custom package metadata.
++custom_dependency_file=/tmp/custom-runtime-dependencies
++: > "$custom_dependency_file"
++for custom_package_name in "${LOCAL_BUILD_PACKAGES[@]}"; do
++  found_custom_package=0
++  for custom_package_file in "$offline_mirror_dir/$custom_package_name-"*.pkg.tar.zst; do
++    [[ -f $custom_package_file ]] || continue
++    read -r actual_name _ < <(pacman -Qp "$custom_package_file")
++    [[ $actual_name == "$custom_package_name" ]] || continue
++    bsdtar -xOf "$custom_package_file" .PKGINFO > /tmp/custom-package-info
++    sed -n 's/^depend = //p' /tmp/custom-package-info >> "$custom_dependency_file"
++    found_custom_package=1
++  done
++  if (( ! found_custom_package )); then
++    echo "ERROR: custom local package missing: $custom_package_name" >&2
++    exit 1
++  fi
++done
++
+ # Collect every package we want available in the offline mirror.
+ declare -a all_packages
+ mapfile -t all_packages < <(
+   {
+     cat "$build_cache_dir/packages.x86_64"
++    cat "$custom_dependency_file"
+     grep -hv '^#\|^$' "${base_pkg_lists[@]}"
+     grep -hv '^#\|^$' /builder/archinstall.packages
+     # Always include the selected Omarchy packages so the target install can
+@@ -217,13 +247,18 @@
+ # the mirror; strip them from the pacman -Syw list so it doesn't try to fetch
+ # the published versions on top.
+ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+-  mapfile -t all_packages < <(
+-    printf '%s\n' "${all_packages[@]}" |
+-      grep -Fxv \
+-        -e "$OMARCHY_RUNTIME_PACKAGE" \
+-        -e "$OMARCHY_SETTINGS_PACKAGE" \
+-        -e "$OMARCHY_NVIM_PACKAGE" || true
+-  )
++  online_packages=()
++  for package_target in "${all_packages[@]}"; do
++    package_name=${package_target%%[<>=]*}
++    built_locally=0
++    for local_name in "${LOCAL_BUILD_PACKAGES[@]}"; do
++      [[ $package_name != "$local_name" ]] || built_locally=1
++    done
++    if (( ! built_locally )); then
++      online_packages+=("$package_target")
++    fi
++  done
++  all_packages=("${online_packages[@]}")
+ fi
+ 
+ mkdir -p /tmp/offlinedb
+@@ -258,8 +293,7 @@
+ # checkouts. Add those exact artifacts back to the keep-set after verifying
+ # that the local build left exactly one file for each selected package name.
+ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+-  for local_package_name in \
+-    "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
++  for local_package_name in "${LOCAL_BUILD_PACKAGES[@]}"; do
+     local_package_file=""
+     for candidate in "$offline_mirror_dir/$local_package_name-"*.pkg.tar.*; do
+       [[ -f $candidate && $candidate != *.sig ]] || continue
+diff --git a/builder/build-omarchy-packages.sh b/builder/build-omarchy-packages.sh
+--- a/builder/build-omarchy-packages.sh
++++ b/builder/build-omarchy-packages.sh
+@@ -42,6 +42,9 @@
+   "$OMARCHY_NVIM_PACKAGE"
+ )
+ 
++source /builder/custom-packages.sh
++packages+=("${CUSTOM_LOCAL_PACKAGES[@]}")
++
+ # Local-source packages must replace every cached build of the same package,
+ # even when the checkout's generated pkgver sorts below a published build.
+ # Otherwise the later generic cache pruning can silently keep edge instead.
+@@ -67,6 +70,24 @@
+     OMARCHY_SRC=/omarchy-source \
+     makepkg --noconfirm --skippgpcheck --skipchecksums --nodeps -f
+   "
++  # Only explicitly selected library providers are installed into the builder.
++  # Do not activate an authentication-policy package in the build container.
++  for provider_name in "${CUSTOM_BUILD_INSTALL_PACKAGES[@]}"; do
++    [[ $provider_name == "$pkg" ]] || continue
++    provider_file=""
++    for candidate in "$work_dir/$pkg-"*.pkg.tar.zst; do
++      [[ -f $candidate ]] || continue
++      read -r candidate_name _ < <(pacman -Qp "$candidate")
++      [[ $candidate_name == "$pkg" ]] || continue
++      if [[ -n $provider_file ]]; then
++        echo "ERROR: multiple local build providers for $pkg" >&2
++        exit 1
++      fi
++      provider_file="$candidate"
++    done
++    [[ -n $provider_file ]] || { echo "ERROR: missing local build provider $pkg" >&2; exit 1; }
++    pacman --noconfirm -U --needed "$provider_file"
++  done
+ done
+ 
+ mkdir -p "$offline_mirror_dir"

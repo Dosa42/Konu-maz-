@@ -1,11 +1,9 @@
-<div align="center">
+# Omarchy custom ISO build
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Private build repository for a real x86_64 Omarchy installation ISO, with pinned upstream sources, ordered patches, local package recipes, and a manual GitHub Actions workflow.
 
-  <h1>Built with AI Studio</h2>
+**Build:** Actions → **Build private Omarchy custom ISO** → **Run workflow**.
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+Read [OMARCHY.md](OMARCHY.md) for the build commands, dependency tools, artifact outputs and source-editing workflow.
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
-
-</div>
+Current status: the ISO build infrastructure is implemented. USB-signer-only authentication still requires integration with the real device protocol and PAM adapter; the development image retains upstream authentication. See [USB signer integration](docs/USB_SIGNER_INTEGRATION.md) and the [exact source-file investigation](docs/Omarchy_USB_signer_exacte_bronbestanden.md).

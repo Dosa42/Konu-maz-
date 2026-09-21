@@ -1,0 +1,76 @@
+name: Build private Omarchy custom ISO
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_sources:
+        description: Include an archive of the effective patched source files
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omarchy-custom-iso-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build x86_64 development ISO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    env:
+      INCLUDE_SOURCE_ARCHIVE: ${{ inputs.include_sources }}
+
+    steps:
+      - name: Check out private build configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Prepare real host build tools and storage
+        run: |
+          set -o pipefail
+          mkdir -p out
+          ./scripts/prepare-build-host.sh 2>&1 | tee out/host-setup.log
+
+      - name: Build the patched Omarchy ISO
+        run: ./scripts/build-iso.sh
+
+      - name: Upload ISO, checksums and build provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: omarchy-custom-development-iso-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/build-*/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload effective source archive
+        if: success() && inputs.include_sources
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: omarchy-effective-sources-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/effective-sources.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build logs and applied source changes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: omarchy-build-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            out/host-setup.log
+            out/iso-build.log
+            out/source-state.json
+            out/source-diffs/
+          if-no-files-found: warn
+          retention-days: 7

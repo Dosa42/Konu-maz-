@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "sources": {
+    "omarchy": {
+      "url": "https://github.com/omacom/omarchy.git",
+      "commit": "ab18321bb53563a8a3f8a44f64ebb9c6463fedc5"
+    },
+    "omarchy-iso": {
+      "url": "https://github.com/omacom/omarchy-iso.git",
+      "commit": "7cfb7111a06873d61c45d37034577d4ba08d3f4f"
+    },
+    "omarchy-pkgs": {
+      "url": "https://github.com/omacom/omarchy-pkgs.git",
+      "commit": "1b3cc7703d8cab2a52c36927502da9f8a48e3af6"
+    }
+  },
+  "archiso": {
+    "url": "https://github.com/archlinux/archiso.git",
+    "commit": "424e78130db2af6c1ceb55b442d7914b1109ff2b"
+  },
+  "builder_image": "archlinux/archlinux@sha256:d6a79be5ad6fb29c92d8888df20420077ce4b4c95d56f061d20f3602088f891a",
+  "node": {
+    "version": "v24.21.0",
+    "sha256": "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff"
+  },
+  "lazyvim_starter_commit": "803bc181d7c0d6d5eeba9274d9be49b287294d99"
+}
+

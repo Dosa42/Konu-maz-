@@ -1,0 +1,10 @@
+# Native build dependencies for the forthcoming PAM/USB integration.
+# These are builder-container packages, not target install selections.
+cmake
+ninja
+pkgconf
+python
+libusb
+pam
+openssl
+
