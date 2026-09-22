@@ -27,7 +27,9 @@ is introduced.
    modules, SSH server entry points, display-manager/authentication providers,
    privilege-entry executables, account-creation hooks, home directories and
    installer/provisioning entry points. Remove their systemd units and drop-ins.
-   Account-dependent units are also removed. Clear existing local enablement.
+   Command-name removal covers all of `/usr` and `/opt`, including shell
+   completions and helpers in nonstandard locations. Account-dependent units
+   are also removed. Clear existing local enablement.
 6. Restrict account lookup to the now-absent local files; remove NSS systemd
    account synthesis and userdb service entry points. Delete SUID/SGID files
    remaining in `/usr` and `/opt`.
@@ -67,6 +69,8 @@ actual account names removed, removed paths and privilege-entry files. It contai
 no password hashes. The build manifest requires and hashes that report. Unexpected
 mkarchiso/mkinitcpio structure or failure to remove requested paths stops the build;
 the build does not silently fall back to the original authentication configuration.
+Removal and the final provider check scan the same trees with the same predicate;
+any surviving provider paths are listed explicitly in the build error.
 
 Source preparation, patch application and syntax checks do not demonstrate a
 successful boot. `vm_boot_tested` and `usb_signer_tested` remain false unless a real

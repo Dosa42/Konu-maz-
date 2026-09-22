@@ -13,6 +13,7 @@ import stat
 
 
 DATABASES = ('passwd', 'shadow', 'group', 'gshadow', 'subuid', 'subgid')
+AUTH_TREES = ('usr', 'opt')
 COMMANDS = set('''
 agetty getty login remote-login loginctl su runuser sudo sudoedit visudo doas
 archinstall cloud-init cloud-init-per systemd-userdb-load-credentials
@@ -115,6 +116,18 @@ class Root:
         return path.relative_to(self.path).as_posix()
 
 
+def authentication_paths(root):
+    # Packages also install command-named completions and helpers outside bin/lib.
+    # Removal and verification must cover the same complete trees.
+    for directory in AUTH_TREES:
+        for entry in root.files(directory) or ():
+            if (entry.name in COMMANDS or entry.name.startswith('libnss_systemd.so')
+                    or entry.name.startswith('libnss_compat.so')
+                    or entry.name.startswith('omarchy-iso-')
+                    or entry.name in ('omarchy-cidata-load', 'omarchy-install-dashboard')):
+                yield entry
+
+
 def finalize(path, evidence):
     root = Root(path)
     # Preserve account names only as external build evidence, never password hashes.
@@ -138,14 +151,9 @@ def finalize(path, evidence):
             raise ValueError('Symlinked Python package directory')
         for entry in directory.glob('archinstall*'):
             root.remove(root.relative(entry))
-    # Eliminate active providers and tools, including their nonstandard libexec paths.
-    for directory in ('usr/bin', 'usr/sbin', 'usr/lib', 'usr/libexec', 'usr/local/bin', 'usr/local/sbin'):
-        for entry in list(root.files(directory) or ()):
-            if (entry.name in COMMANDS or entry.name.startswith('libnss_systemd.so')
-                    or entry.name.startswith('libnss_compat.so')
-                    or entry.name.startswith('omarchy-iso-')
-                    or entry.name in ('omarchy-cidata-load', 'omarchy-install-dashboard')):
-                root.remove(root.relative(entry))
+    # Eliminate providers, tools and command-named support files in every install tree.
+    for entry in list(authentication_paths(root)):
+        root.remove(root.relative(entry))
     # Delete service definitions rather than replacing them with /dev/null masks.
     units = root.child('usr/lib/systemd/system')
     deleted_units = set()
@@ -214,8 +222,9 @@ def finalize(path, evidence):
             raise RuntimeError(f'Account database survived: {name}')
     if root.child('etc/pam.d').exists() or root.child('usr/lib/security').exists():
         raise RuntimeError('PAM service configuration or modules survived')
-    if any(entry.name in COMMANDS for entry in root.files('usr') or ()):
-        raise RuntimeError('An authentication/account executable survived')
+    survivors = sorted(root.relative(entry) for entry in authentication_paths(root))
+    if survivors:
+        raise RuntimeError('Authentication/account paths survived: ' + ', '.join(survivors))
     result = {
         'schema': 1, 'profile': 'custom-no-login', 'removed_accounts': accounts,
         'removed_paths': sorted(set(root.removed)), 'removed_privileged_files': privileged,

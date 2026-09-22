@@ -1,0 +1,28 @@
+diff --git a/builder/build-iso.sh b/builder/build-iso.sh
+index dddf62a..7e5c064 100755
+--- a/builder/build-iso.sh
++++ b/builder/build-iso.sh
+@@ -71,6 +71,10 @@ rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
+ 
+ # Bring in our archiso profile additions.
+ cp -r /configs/* "$build_cache_dir/"
++# releng supplies a stock-linux preset even though this image installs linux-t2
++# only. Remove it before pacstrap/mkinitcpio so no hook requests the absent
++# /boot/vmlinuz-linux. Keep linux-t2.preset for the actual boot kernel.
++rm -f -- "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux.preset"
+ # The overlay cannot delete files inherited from releng. Remove alternate boot
+ # configurations explicitly after the merge. The selected bootmodes are BIOS
+ # Syslinux and UEFI GRUB; efiboot belongs to the unused systemd-boot profile.
+diff --git a/configs/airootfs/etc/mkinitcpio.d/linux-t2.preset b/configs/airootfs/etc/mkinitcpio.d/linux-t2.preset
+index 2fbeecd..2cd0606 100644
+--- a/configs/airootfs/etc/mkinitcpio.d/linux-t2.preset
++++ b/configs/airootfs/etc/mkinitcpio.d/linux-t2.preset
+@@ -8,7 +8,7 @@
+ # stock kernel at the T2 filenames, so the ISO booted stock Arch while every
+ # boot entry said linux-t2 and T2 Macs got no keyboard or trackpad.
+ #
+-# releng ships its own linux.preset for the stock kernel; leave it alone.
++# The builder removes releng's stock linux.preset because only linux-t2 is installed.
+ 
+ PRESETS=('archiso')
+ 

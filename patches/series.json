@@ -6,7 +6,8 @@
     "0003-builder-source-ownership.patch",
     "0004-pinned-offline-firmware.patch",
     "0005-remove-live-login.patch",
-    "0006-single-boot-entry.patch"
+    "0006-single-boot-entry.patch",
+    "0007-remove-stock-kernel-preset.patch"
   ],
   "omarchy-pkgs": [
     "0001-pinned-nvim-source.patch",
