@@ -14,4 +14,5 @@ The integration still requires identification of:
 
 Place the real package recipes in `overlays/omarchy-pkgs/pkgbuilds/`, list their names in `overlays/omarchy-iso/builder/custom-local.packages`, and record existing-source edits in `patches/series.json`. The builder will compile and include them rather than substituting mirror packages of the same names.
 
-The current ISO metadata says `authentication: upstream-unmodified`. Update this only with the real authentication implementation and its actual verification results. Successful source preparation, compilation or ISO catalogue inspection does not demonstrate USB authentication on hardware.
+The current ISO metadata says `authentication: removed-no-replacement`. This is the explicitly requested intermediate stage: existing local accounts and login facilities are removed before the signer is integrated. It does not mean the signer works. See [NO_LOGIN_STAGE.md](NO_LOGIN_STAGE.md). Successful source preparation, compilation or ISO catalogue inspection does not demonstrate USB authentication on hardware.
+

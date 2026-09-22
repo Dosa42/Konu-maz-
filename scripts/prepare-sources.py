@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 
@@ -20,11 +21,11 @@ class PreparationError(RuntimeError):
     pass
 
 
-def run(args, cwd=None, check=True):
+def run(args, cwd=None, check=True, env=None):
     result = subprocess.run(
         [str(arg) for arg in args], cwd=cwd,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})},
     )
     if check and result.returncode:
         details = result.stderr.decode("utf-8", "replace").strip()
@@ -36,8 +37,8 @@ def run(args, cwd=None, check=True):
     return result
 
 
-def git(repository, *args, check=True):
-    return run(["git", "-C", repository, *args], check=check)
+def git(repository, *args, check=True, env=None):
+    return run(["git", "-C", repository, *args], check=check, env=env)
 
 
 def git_text(repository, *args):
@@ -150,15 +151,54 @@ def prepare_archiso(iso, spec):
     return path
 
 
+def patch_series_is_applied(repository, patches):
+    """Reverse the whole series in an isolated index, leaving source work intact.
+
+    A later patch may change the context or result of an earlier one. Checking
+    each earlier patch in isolation therefore cannot recognize the completed
+    series. Reverse-order application reconstructs its intermediate states.
+    """
+    if not patches:
+        return True
+    with tempfile.TemporaryDirectory(prefix="omarchy-patch-index-") as temporary:
+        env = {"GIT_INDEX_FILE": str(Path(temporary) / "index")}
+        git(repository, "read-tree", "HEAD", env=env)
+        # Include new patch/overlay files as well as tracked modifications and
+        # deletions. This writes only the disposable index, never the real index.
+        git(repository, "add", "--all", "--", ".", env=env)
+        for patch in reversed(patches):
+            result = git(
+                repository, "apply", "--cached", "--reverse", "--", patch,
+                env=env, check=False,
+            )
+            if result.returncode:
+                return False
+    return True
+
+
 def apply_patches(name, repository, series):
     applied = []
     base = safe_child(ROOT / "patches", name)
+    patches = []
     for relative in series:
         if not isinstance(relative, str):
             raise PreparationError(f"{name}: patch filenames must be strings")
         patch = safe_child(base, relative)
         if not patch.is_file():
             raise PreparationError(f"Missing patch file: {patch}")
+        patches.append(patch)
+    # Recognize a prepared prefix too: a later patch within that prefix may
+    # already have changed an earlier patch's result/context.
+    applied_prefix = next(
+        (count for count in range(len(patches), 0, -1)
+         if patch_series_is_applied(repository, patches[:count])),
+        0,
+    )
+    for index, (relative, patch) in enumerate(zip(series, patches)):
+        if index < applied_prefix:
+            print(f"{name}: {relative}: already-applied", flush=True)
+            applied.append({"path": f"patches/{name}/{relative}", "sha256": digest(patch), "state": "already-applied"})
+            continue
         forward = git(repository, "apply", "--check", "--", patch, check=False)
         if forward.returncode == 0:
             git(repository, "apply", "--", patch)

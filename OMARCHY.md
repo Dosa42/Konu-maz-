@@ -2,7 +2,7 @@
 
 This repository contains a manual GitHub Actions workflow and pinned source checkouts for building an actual x86_64 Omarchy installation ISO. The repository is private. The workflow stores artifacts in this repository and does not publish releases, Pages, containers, or a download website.
 
-**Current authentication status: development build infrastructure. USB-signer-only login is not implemented yet. The image currently retains upstream authentication.** The same status is embedded at `/usr/share/omarchy-iso/custom-build-status.json` and recorded in the build manifest. This is not a completed signer-only installation image.
+**Current authentication stage: existing login facilities and all local account records are removed from the live image, including root and system accounts. No replacement authentication is installed.** The same status is embedded at `/usr/share/omarchy-iso/custom-build-status.json` and recorded in the build manifest. This is not a completed signer-only installation image.
 
 ## Start the ISO build
 
@@ -52,7 +52,7 @@ The script preserves local source changes on the pinned HEAD. It refuses to rese
 
 For an existing source file, edit its local checkout and save the incremental diff as an additional patch under `patches/<source>/`. Add its filename to that source's ordered array in `patches/series.json`. Do not save a second patch that repeats changes already present in an earlier patch. New files can be placed directly under `overlays/<source>/` at their required source-relative path. GitHub Actions only receives tracked changes; local uncommitted edits inside a source checkout are not transferred by pushing the build repository alone.
 
-The supplied patches make the builder accept immutable image/Node inputs and unique output directories, use a pinned LazyVim starter revision, propagate a failed Neovim build command, identify the ISO as a development build, and integrate additional local packages. They do not replace the authentication system.
+The supplied patches make the builder accept immutable image/Node inputs and unique output directories, use a pinned LazyVim starter revision, propagate a failed Neovim build command, identify the ISO as a development build, and integrate additional local packages. The subsequent removal patches produce the intermediate no-login image described in [NO_LOGIN_STAGE.md](docs/NO_LOGIN_STAGE.md).
 
 ### Firmware removed from an upstream package index
 
@@ -87,10 +87,11 @@ Install and start Docker Engine on a Linux x86_64 host, then:
 
 Host tools include Git, curl, jq, Python 3, rsync, zstd and xorriso. The Arch container installs Archiso, the compiler/binutils/make toolchain, GRUB, image/package tools and the upstream Node/Neovim build dependencies. Additional PAM/USB development dependencies already listed are CMake, Ninja, pkgconf, Python, libusb, PAM and OpenSSL.
 
-The build needs network access to fetch source and packages. The resulting installer carries an offline package repository. Source/image/Node versions are pinned; rolling Arch/Omarchy package repositories and LazyVim's plugin resolution still prevent a claim of byte-for-byte reproducibility. Actual selected package names and versions are saved with each output.
+The build needs network access to fetch source and packages. The intermediate image retains the offline package archives as build inputs, but its executable installer and account provisioning entry points are removed. The archives are not a sanitized installation target and must not be used to claim that a later installed OS has this removal policy. Source/image/Node versions are pinned; rolling Arch/Omarchy package repositories and LazyVim's plugin resolution still prevent a claim of byte-for-byte reproducibility. Actual selected package names and versions are saved with each output.
 
 The ISO plus package mirror/container layers need substantial disk space. Host setup reports the actual available storage; 35 GiB is an advisory budget, not an enforced estimate. Only on disposable GitHub-hosted runners does it remove the explicitly listed unrelated preinstalled Android/Haskell/.NET/CodeQL directories. It does not perform that cleanup on a local or self-hosted machine.
 
 ## Scope of the current result
 
-The repository provides the actual source preparation and build machinery for implementing and building the custom ISO. The USB device protocol, account enrollment and PAM integration must be completed against the selected real signer artifacts before changing the embedded authentication status or describing an image as signer-only. The implementation map is in `docs/Omarchy_USB_signer_exacte_bronbestanden.md`.
+The repository provides the actual source preparation and build machinery for implementing and building the custom ISO. The embedded status now describes the removal stage only. The USB device protocol, account enrollment and authentication integration remain separate work before an image can be described as signer-only. The implementation map is in `docs/Omarchy_USB_signer_exacte_bronbestanden.md`.
+

@@ -1,0 +1,50 @@
+diff --git a/builder/build-iso.sh b/builder/build-iso.sh
+--- a/builder/build-iso.sh
++++ b/builder/build-iso.sh
+@@ -154,7 +154,7 @@
+ # install is entirely offline and the live environment needs no Wi-Fi driver.
+ #
+ # Anchored so linux-t2 and linux-firmware are untouched.
+-sed -i -E '/^(linux|broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
++sed -i -E '/^(linux|broadcom-wl|edk2-shell|memtest86\+|memtest86\+-efi)$/d' "$build_cache_dir/packages.x86_64"
+ 
+ # Build the offline mirror: everything pacstrap might want during the target
+ # install. With --local-source, the omarchy* packages we just built are
+@@ -409,8 +409,11 @@
+ pacman -Q > /out/build-environment-packages.txt
+ printf '%s\n' "${required_package_files[@]}" | sort > /out/offline-packages.txt
+ 
+-# Build the ISO.
+-mkarchiso -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
++# Finalize with the locked mkarchiso, after boot files/package work and before SquashFS.
++# The build-only helper removes accounts/providers; it is never an installed PAM hook.
++grub-mkstandalone --help | grep -q -- --disable-cli
++python3 /builder/remove-login.py wire /archiso/archiso/mkarchiso /tmp/mkarchiso-no-login
++/tmp/mkarchiso-no-login -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
+ 
+ # Match host UID/GID on output.
+ if [[ -n $HOST_UID && -n $HOST_GID ]]; then
+diff --git a/configs/airootfs/etc/mkinitcpio.conf.d/archiso.conf b/configs/airootfs/etc/mkinitcpio.conf.d/archiso.conf
+--- a/configs/airootfs/etc/mkinitcpio.conf.d/archiso.conf
++++ b/configs/airootfs/etc/mkinitcpio.conf.d/archiso.conf
+@@ -1,2 +1,2 @@
+-# Configuration for archiso with Plymouth
+-HOOKS=(base udev microcode modconf kms memdisk archiso archiso_loop_mnt archiso_pxe_common archiso_pxe_nbd archiso_pxe_http archiso_pxe_nfs plymouth block filesystems keyboard)
++# Live intermediate image: no Plymouth session, PXE path or recovery shell.
++HOOKS=(base udev microcode modconf kms memdisk archiso archiso_loop_mnt block filesystems keyboard omarchy-no-login)
+diff --git a/configs/profiledef.sh b/configs/profiledef.sh
+--- a/configs/profiledef.sh
++++ b/configs/profiledef.sh
+@@ -1,10 +1,10 @@
+ #!/usr/bin/env bash
+ # shellcheck disable=SC2034
+ 
+-iso_name="omarchy-custom-development"
++iso_name="omarchy-custom-no-login"
+ iso_label="OMARCHY_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
+ iso_publisher="Dosa42 private custom build"
+-iso_application="Omarchy Custom Development Installer"
++iso_application="Omarchy Custom No-Login Development Stage"
+ iso_version="$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y.%m.%d)"
+ install_dir="arch"
+ buildmodes=('iso')

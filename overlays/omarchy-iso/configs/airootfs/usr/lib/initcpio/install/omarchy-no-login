@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+# Build-time only. This hook has no runtime hook and must be last in HOOKS.
+build() {
+    local applets applet
+    if [[ ${_hooks[-1]:-} != omarchy-no-login ]]; then
+        die 'omarchy-no-login must be the last mkinitcpio build hook'
+    fi
+    if (( ${#_optincludes[@]} )); then
+        die 'omarchy-no-login does not permit later mkinitcpio --include additions'
+    fi
+    # mkinitcpio adds FILES/BINARIES after install hooks. The profile uses neither;
+    # reject them rather than permit a later copy to restore a deleted facility.
+    if ! (
+        local -a FILES=() BINARIES=()
+        # shellcheck disable=SC1090
+        source "${_f_config:?}" || exit 1
+        (( ${#FILES[@]} == 0 && ${#BINARIES[@]} == 0 ))
+    ); then
+        die 'omarchy-no-login requires an initramfs config without FILES/BINARIES additions'
+    fi
+    # Removing a multicall applet symlink cannot remove its implementation.
+    # Arch's initcpio BusyBox must itself be built without login/account applets.
+    applets="$(/usr/lib/initcpio/busybox --list)" || die 'Cannot inspect the initcpio BusyBox applets'
+    while IFS= read -r applet; do
+        case "$applet" in
+            login|getty|sulogin|su|passwd|chpasswd|adduser|deluser|addgroup|delgroup|telnetd)
+                die "BusyBox contains forbidden login/account applet: $applet"
+                ;;
+        esac
+    done <<< "$applets"
+    /usr/bin/python /usr/lib/omarchy-no-login/strip-initramfs.py "${BUILDROOT:?}" \
+        || die 'Initramfs login/account removal failed'
+}
+
+help() {
+    cat <<'EOF'
+Remove initramfs account records and interactive login/recovery entry points.
+Keep the noninteractive shell interpreter required by ArchISO's boot scripts.
+Boot errors halt without opening a shell. Install this hook last in HOOKS.
+EOF
+}

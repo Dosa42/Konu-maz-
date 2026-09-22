@@ -1,0 +1,365 @@
+diff --git a/builder/build-iso.sh b/builder/build-iso.sh
+index aa2feb3..68ee588 100755
+--- a/builder/build-iso.sh
++++ b/builder/build-iso.sh
+@@ -64,6 +64,14 @@ rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
+ 
+ # Bring in our archiso profile additions.
+ cp -r /configs/* "$build_cache_dir/"
++# The overlay cannot delete files inherited from releng. Remove alternate boot
++# configurations explicitly after the merge. The selected bootmodes are BIOS
++# Syslinux and UEFI GRUB; efiboot belongs to the unused systemd-boot profile.
++rm -rf -- "$build_cache_dir/efiboot"
++rm -f -- "$build_cache_dir/grub/loopback.cfg" \
++  "$build_cache_dir/syslinux/archiso_pxe.cfg" \
++  "$build_cache_dir/syslinux/archiso_pxe-linux.cfg" \
++  "$build_cache_dir/syslinux/archiso_tail.cfg"
+ mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
+ echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
+ echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
+diff --git a/configs/efiboot/loader/entries/01-archiso-x86_64-linux.conf b/configs/efiboot/loader/entries/01-archiso-x86_64-linux.conf
+deleted file mode 100644
+index bf6d18c..0000000
+--- a/configs/efiboot/loader/entries/01-archiso-x86_64-linux.conf
++++ /dev/null
+@@ -1,5 +0,0 @@
+-title    Omarchy (x86_64, UEFI)
+-sort-key 01
+-linux    /%INSTALL_DIR%/boot/x86_64/vmlinuz-linux-t2
+-initrd   /%INSTALL_DIR%/boot/x86_64/initramfs-linux-t2.img
+-options  archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID% quiet splash xe.enable_panel_replay=0 initramfs_async=0
+diff --git a/configs/efiboot/loader/loader.conf b/configs/efiboot/loader/loader.conf
+deleted file mode 100644
+index d92d6a4..0000000
+--- a/configs/efiboot/loader/loader.conf
++++ /dev/null
+@@ -1,3 +0,0 @@
+-timeout 0
+-default 01-archiso-x86_64-linux.conf
+-beep off
+diff --git a/configs/grub/grub.cfg b/configs/grub/grub.cfg
+index a0f67ef..bc28960 100644
+--- a/configs/grub/grub.cfg
++++ b/configs/grub/grub.cfg
+@@ -17,17 +17,6 @@ if loadfont "${prefix}/fonts/unicode.pf2" ; then
+     terminal_output gfxterm
+ fi
+ 
+-# Enable serial console
+-insmod serial
+-insmod usbserial_common
+-insmod usbserial_ftdi
+-insmod usbserial_pl2303
+-insmod usbserial_usbdebug
+-if serial --unit=0 --speed=115200; then
+-    terminal_input --append serial
+-    terminal_output --append serial
+-fi
+-
+ # Get a human readable platform identifier
+ if [ "${grub_platform}" == 'efi' ]; then
+     archiso_platform='UEFI'
+@@ -50,57 +39,11 @@ timeout=0
+ timeout_style=hidden
+ 
+ 
+-# Menu entries
++# A single normal boot entry; no bootloader login is configured.
++# mkarchiso generates GRUB with --disable-cli to remove interactive entry paths.
+ 
+ menuentry "Omarchy (%ARCH%, ${archiso_platform})" --class arch --class gnu-linux --class gnu --class os --id 'archlinux' {
+     set gfxpayload=keep
+-    linux /%INSTALL_DIR%/boot/%ARCH%/vmlinuz-linux-t2 archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID% quiet splash xe.enable_panel_replay=0 initramfs_async=0
+-    initrd /%INSTALL_DIR%/boot/%ARCH%/initramfs-linux-t2.img
+-}
+-
+-menuentry "Omarchy with speakup screen reader (%ARCH%, ${archiso_platform})" --hotkey s --class arch --class gnu-linux --class gnu --class os --id 'archlinux-accessibility' {
+-    set gfxpayload=keep
+-    linux /%INSTALL_DIR%/boot/%ARCH%/vmlinuz-linux-t2 archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID% accessibility=on xe.enable_panel_replay=0 initramfs_async=0
++    linux /%INSTALL_DIR%/boot/%ARCH%/vmlinuz-linux-t2 archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID% xe.enable_panel_replay=0 initramfs_async=0
+     initrd /%INSTALL_DIR%/boot/%ARCH%/initramfs-linux-t2.img
+ }
+-
+-
+-if [ "${grub_platform}" == 'efi' -a "${grub_cpu}" == 'x86_64' -a -f '/boot/memtest86+/memtest.efi' ]; then
+-    menuentry 'Run Memtest86+ (RAM test)' --class memtest86 --class memtest --class gnu --class tool {
+-        set gfxpayload=800x600,1024x768
+-        linux /boot/memtest86+/memtest.efi
+-    }
+-fi
+-if [ "${grub_platform}" == 'pc' -a -f '/boot/memtest86+/memtest' ]; then
+-    menuentry 'Run Memtest86+ (RAM test)' --class memtest86 --class memtest --class gnu --class tool {
+-        set gfxpayload=800x600,1024x768
+-        linux /boot/memtest86+/memtest
+-    }
+-fi
+-if [ "${grub_platform}" == 'efi' ]; then
+-    if [ "${grub_cpu}" == 'x86_64' -a -f '/shellx64.efi' ]; then
+-        menuentry 'UEFI Shell' --class efi {
+-            chainloader /shellx64.efi
+-        }
+-    elif [ "${grub_cpu}" == "i386" -a -f '/shellia32.efi' ]; then
+-        menuentry 'UEFI Shell' --class efi {
+-            chainloader /shellia32.efi
+-        }
+-    fi
+-
+-    menuentry 'UEFI Firmware Settings' --id 'uefi-firmware' {
+-        fwsetup
+-    }
+-fi
+-
+-menuentry 'System shutdown' --class shutdown --class poweroff {
+-    echo 'System shutting down...'
+-    halt
+-}
+-
+-menuentry 'System restart' --class reboot --class restart {
+-    echo 'System rebooting...'
+-    reboot
+-}
+-
+-
+diff --git a/configs/grub/loopback.cfg b/configs/grub/loopback.cfg
+deleted file mode 100644
+index 395a291..0000000
+--- a/configs/grub/loopback.cfg
++++ /dev/null
+@@ -1,80 +0,0 @@
+-# https://www.supergrubdisk.org/wiki/Loopback.cfg
+-
+-# Search for the ISO volume
+-search --no-floppy --set=archiso_img_dev --file "${iso_path}"
+-probe --set archiso_img_dev_uuid --fs-uuid "${archiso_img_dev}"
+-
+-# Get a human readable platform identifier
+-if [ "${grub_platform}" == 'efi' ]; then
+-    archiso_platform='UEFI'
+-    if [ "${grub_cpu}" == 'x86_64' ]; then
+-        archiso_platform="x64 ${archiso_platform}"
+-    elif [ "${grub_cpu}" == 'i386' ]; then
+-        archiso_platform="IA32 ${archiso_platform}"
+-    else
+-        archiso_platform="${grub_cpu} ${archiso_platform}"
+-    fi
+-elif [ "${grub_platform}" == 'pc' ]; then
+-    archiso_platform='BIOS'
+-else
+-    archiso_platform="${grub_cpu} ${grub_platform}"
+-fi
+-
+-# Set default menu entry
+-default=archlinux
+-timeout=0
+-timeout_style=hidden
+-
+-
+-# Menu entries
+-
+-menuentry "Omarchy (%ARCH%, ${archiso_platform})" --class arch --class gnu-linux --class gnu --class os --id 'archlinux' {
+-    set gfxpayload=keep
+-    linux /%INSTALL_DIR%/boot/%ARCH%/vmlinuz-linux-t2 archisobasedir=%INSTALL_DIR% img_dev=UUID=${archiso_img_dev_uuid} img_loop="${iso_path}" quiet splash xe.enable_panel_replay=0 initramfs_async=0
+-    initrd /%INSTALL_DIR%/boot/%ARCH%/initramfs-linux-t2.img
+-}
+-
+-menuentry "Omarchy with speakup screen reader (%ARCH%, ${archiso_platform})" --hotkey s --class arch --class gnu-linux --class gnu --class os --id 'archlinux-accessibility' {
+-    set gfxpayload=keep
+-    linux /%INSTALL_DIR%/boot/%ARCH%/vmlinuz-linux-t2 archisobasedir=%INSTALL_DIR% img_dev=UUID=${archiso_img_dev_uuid} img_loop="${iso_path}" accessibility=on xe.enable_panel_replay=0 initramfs_async=0
+-    initrd /%INSTALL_DIR%/boot/%ARCH%/initramfs-linux-t2.img
+-}
+-
+-
+-if [ "${grub_platform}" == 'efi' -a "${grub_cpu}" == 'x86_64' -a -f '/boot/memtest86+/memtest.efi' ]; then
+-    menuentry 'Run Memtest86+ (RAM test)' --class memtest86 --class memtest --class gnu --class tool {
+-        set gfxpayload=800x600,1024x768
+-        linux /boot/memtest86+/memtest.efi
+-    }
+-fi
+-if [ "${grub_platform}" == 'pc' -a -f '/boot/memtest86+/memtest' ]; then
+-    menuentry 'Run Memtest86+ (RAM test)' --class memtest86 --class memtest --class gnu --class tool {
+-        set gfxpayload=800x600,1024x768
+-        linux /boot/memtest86+/memtest
+-    }
+-fi
+-if [ "${grub_platform}" == 'efi' ]; then
+-    if [ "${grub_cpu}" == 'x86_64' -a -f '/shellx64.efi' ]; then
+-        menuentry 'UEFI Shell' --class efi {
+-            chainloader /shellx64.efi
+-        }
+-    elif [ "${grub_cpu}" == "i386" -a -f '/shellia32.efi' ]; then
+-        menuentry 'UEFI Shell' --class efi {
+-            chainloader /shellia32.efi
+-        }
+-    fi
+-
+-    menuentry 'UEFI Firmware Settings' --id 'uefi-firmware' {
+-        fwsetup
+-    }
+-fi
+-
+-menuentry 'System shutdown' --class shutdown --class poweroff {
+-    echo 'System shutting down...'
+-    halt
+-}
+-
+-menuentry 'System restart' --class reboot --class restart {
+-    echo 'System rebooting...'
+-    reboot
+-}
+diff --git a/configs/syslinux/archiso_head.cfg b/configs/syslinux/archiso_head.cfg
+index d1a9870..fb00ac3 100644
+--- a/configs/syslinux/archiso_head.cfg
++++ b/configs/syslinux/archiso_head.cfg
+@@ -1,4 +1,6 @@
+-SERIAL 0 115200
++PROMPT 0
++NOESCAPE 1
++ALLOWOPTIONS 0
+ UI vesamenu.c32
+ MENU TITLE Omarchy
+ MENU BACKGROUND splash.png
+diff --git a/configs/syslinux/archiso_pxe-linux.cfg b/configs/syslinux/archiso_pxe-linux.cfg
+deleted file mode 100644
+index 8cf9092..0000000
+--- a/configs/syslinux/archiso_pxe-linux.cfg
++++ /dev/null
+@@ -1,32 +0,0 @@
+-LABEL arch64_nbd
+-TEXT HELP
+-Boot the Omarchy install medium using NBD.
+-It allows you to install Omarchy or perform system maintenance.
+-ENDTEXT
+-MENU LABEL Omarchy install medium (x86_64, NBD)
+-LINUX ::/%INSTALL_DIR%/boot/x86_64/vmlinuz-linux-t2
+-INITRD ::/%INSTALL_DIR%/boot/x86_64/initramfs-linux-t2.img
+-APPEND archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID% archiso_nbd_srv=${pxeserver} cms_verify=y initramfs_async=0
+-SYSAPPEND 3
+-
+-LABEL arch64_nfs
+-TEXT HELP
+-Boot the Omarchy live medium using NFS.
+-It allows you to install Omarchy or perform system maintenance.
+-ENDTEXT
+-MENU LABEL Omarchy install medium (x86_64, NFS)
+-LINUX ::/%INSTALL_DIR%/boot/x86_64/vmlinuz-linux-t2
+-INITRD ::/%INSTALL_DIR%/boot/x86_64/initramfs-linux-t2.img
+-APPEND archisobasedir=%INSTALL_DIR% archiso_nfs_srv=${pxeserver}:/run/archiso/bootmnt cms_verify=y initramfs_async=0
+-SYSAPPEND 3
+-
+-LABEL arch64_http
+-TEXT HELP
+-Boot the Omarchy live medium using HTTP.
+-It allows you to install Omarchy or perform system maintenance.
+-ENDTEXT
+-MENU LABEL Omarchy install medium (x86_64, HTTP)
+-LINUX ::/%INSTALL_DIR%/boot/x86_64/vmlinuz-linux-t2
+-INITRD ::/%INSTALL_DIR%/boot/x86_64/initramfs-linux-t2.img
+-APPEND archisobasedir=%INSTALL_DIR% archiso_http_srv=http://${pxeserver}/ cms_verify=y initramfs_async=0
+-SYSAPPEND 3
+diff --git a/configs/syslinux/archiso_pxe.cfg b/configs/syslinux/archiso_pxe.cfg
+deleted file mode 100644
+index b4c9a80..0000000
+--- a/configs/syslinux/archiso_pxe.cfg
++++ /dev/null
+@@ -1,5 +0,0 @@
+-INCLUDE archiso_head.cfg
+-
+-INCLUDE archiso_pxe-linux.cfg
+-
+-INCLUDE archiso_tail.cfg
+diff --git a/configs/syslinux/archiso_sys-linux.cfg b/configs/syslinux/archiso_sys-linux.cfg
+--- a/configs/syslinux/archiso_sys-linux.cfg
++++ b/configs/syslinux/archiso_sys-linux.cfg
+@@ -1,20 +1,9 @@
+ LABEL arch64
+ TEXT HELP
+-Boot the Omarchy install medium on BIOS.
+-It allows you to install Omarchy or perform system maintenance.
++Boot the Omarchy intermediate image on BIOS.
++This image has no login method installed yet.
+ ENDTEXT
+-MENU LABEL Omarchy install medium (x86_64, BIOS)
++MENU LABEL Omarchy (x86_64, BIOS)
+ LINUX /%INSTALL_DIR%/boot/x86_64/vmlinuz-linux-t2
+ INITRD /%INSTALL_DIR%/boot/x86_64/initramfs-linux-t2.img
+-APPEND archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID% quiet splash xe.enable_panel_replay=0 initramfs_async=0
+-
+-# Accessibility boot option
+-LABEL arch64speech
+-TEXT HELP
+-Boot the Omarchy install medium on BIOS with speakup screen reader.
+-It allows you to install Omarchy or perform system maintenance with speech feedback.
+-ENDTEXT
+-MENU LABEL Omarchy install medium (x86_64, BIOS) with ^speech
+-LINUX /%INSTALL_DIR%/boot/x86_64/vmlinuz-linux-t2
+-INITRD /%INSTALL_DIR%/boot/x86_64/initramfs-linux-t2.img
+-APPEND archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID% accessibility=on xe.enable_panel_replay=0 initramfs_async=0
++APPEND archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID% xe.enable_panel_replay=0 initramfs_async=0
+diff --git a/configs/syslinux/archiso_sys.cfg b/configs/syslinux/archiso_sys.cfg
+index d93bcfe..e9f480c 100644
+--- a/configs/syslinux/archiso_sys.cfg
++++ b/configs/syslinux/archiso_sys.cfg
+@@ -4,5 +4,3 @@ DEFAULT arch64
+ TIMEOUT 150
+ 
+ INCLUDE archiso_sys-linux.cfg
+-
+-INCLUDE archiso_tail.cfg
+diff --git a/configs/syslinux/archiso_tail.cfg b/configs/syslinux/archiso_tail.cfg
+deleted file mode 100644
+index e84897c..0000000
+--- a/configs/syslinux/archiso_tail.cfg
++++ /dev/null
+@@ -1,35 +0,0 @@
+-LABEL existing
+-TEXT HELP
+-Boot an existing operating system.
+-Press TAB to edit the disk and partition number to boot.
+-ENDTEXT
+-MENU LABEL Boot existing OS
+-COM32 chain.c32
+-APPEND hd0 0
+-
+-# https://www.memtest.org/
+-LABEL memtest
+-MENU LABEL Run Memtest86+ (RAM test)
+-LINUX /boot/memtest86+/memtest
+-
+-# https://wiki.syslinux.org/wiki/index.php/Hdt_(Hardware_Detection_Tool)
+-LABEL hdt
+-MENU LABEL Hardware Information (HDT)
+-COM32 hdt.c32
+-APPEND modules_alias=hdt/modalias.gz pciids=hdt/pciids.gz
+-
+-LABEL reboot
+-TEXT HELP
+-Reboot computer.
+-The computer's firmware must support APM.
+-ENDTEXT
+-MENU LABEL Reboot
+-COM32 reboot.c32
+-
+-LABEL poweroff
+-TEXT HELP
+-Power off computer.
+-The computer's firmware must support APM.
+-ENDTEXT
+-MENU LABEL Power Off
+-COM32 poweroff.c32
+diff --git a/configs/syslinux/syslinux.cfg b/configs/syslinux/syslinux.cfg
+index cbda72f..837a0bf 100644
+--- a/configs/syslinux/syslinux.cfg
++++ b/configs/syslinux/syslinux.cfg
+@@ -1,11 +1 @@
+-DEFAULT select
+-
+-LABEL select
+-COM32 whichsys.c32
+-APPEND -pxe- pxe -sys- sys -iso- sys
+-
+-LABEL pxe
+-CONFIG archiso_pxe.cfg
+-
+-LABEL sys
+-CONFIG archiso_sys.cfg
++INCLUDE archiso_sys.cfg

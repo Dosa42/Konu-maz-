@@ -33,7 +33,7 @@ def main():
         'repository_commit': repository_commit,
         'run_id': os.environ.get('GITHUB_RUN_ID'),
         'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT'),
-        'profile': 'custom-development',
+        'profile': 'custom-no-login',
         'authentication': json.loads((ROOT / 'sources/omarchy-iso/configs/airootfs/usr/share/omarchy-iso/custom-build-status.json').read_text()),
         'source_date_epoch': int(os.environ['SOURCE_DATE_EPOCH']),
         'locked_inputs': lock,
@@ -43,7 +43,7 @@ def main():
         'verification': {'iso_created': True, 'el_torito_catalog_read': True, 'vm_boot_tested': False, 'usb_signer_tested': False},
         'reproducibility': 'Source/image/Node pins recorded; Arch/Omarchy mirrors and LazyVim plugin resolution remain network-resolved.',
     }
-    for name in ('builder-image.json', 'offline-packages.txt', 'pinned-offline-packages.json', 'build-environment-packages.txt', 'node-dist.sha256', 'boot-catalog.txt'):
+    for name in ('builder-image.json', 'offline-packages.txt', 'pinned-offline-packages.json', 'build-environment-packages.txt', 'node-dist.sha256', 'boot-catalog.txt', 'removed-login.json'):
         path = iso.parent / name
         if not path.is_file():
             raise FileNotFoundError(f'Missing build evidence: {path}')
@@ -53,3 +53,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

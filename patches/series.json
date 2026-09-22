@@ -4,7 +4,9 @@
     "0001-build-inputs.patch",
     "0002-local-packages.patch",
     "0003-builder-source-ownership.patch",
-    "0004-pinned-offline-firmware.patch"
+    "0004-pinned-offline-firmware.patch",
+    "0005-remove-live-login.patch",
+    "0006-single-boot-entry.patch"
   ],
   "omarchy-pkgs": [
     "0001-pinned-nvim-source.patch",

@@ -1,8 +1,9 @@
 {
   "schema": 1,
-  "profile": "custom-development",
-  "authentication": "upstream-unmodified",
-  "usb_signer_integration": "pending-real-device-protocol-and-pam-adapter",
-  "description": "This build environment does not yet implement USB-signer-only authentication."
+  "profile": "custom-no-login",
+  "authentication": "removed-no-replacement",
+  "local_accounts": "removed-including-root-and-system-accounts",
+  "usb_signer_integration": "not-installed",
+  "boot_target": "omarchy-no-login.target",
+  "description": "Intermediate development image: no installed login routes, local account records or interactive installer. Linux UID 0 and required shared-library ABIs remain; cryptographic login is a later change."
 }
-
