@@ -1,19 +1,37 @@
-# USB signer integration status
+# USB reading and signer integration status
 
-The requested final policy is local authentication using only the owner's ML-DSA-65/87 USB signer, with password, fingerprint, independent FIDO and autologin alternatives removed from the intended login/unlock paths. The build environment in this repository is ready to carry those source changes; the authentication implementation itself is not supplied by the upstream ISO builder.
+The current profile has one GTK4 graphical password login for `kralporsuk`
+(UID 0 / GID 0), with the explicitly selected temporary password `0000`. The sole
+shadow hash is checked through libxcrypt, without PAM or another login provider.
+Both live and installed systems start at this login page; successful authentication
+opens the installer or installed Hyprland desktop, respectively.
 
-The previously inspected artifacts contain real UAGL cryptographic source, AArch64 assembly/objects/static libraries and worker code. The examined worker protocol uses stdin/stdout and handles secret-key payloads; it is not evidence of an existing USB token key-handle protocol. This does not establish that other user-owned builds are absent. No private-key material or crypto archive has been copied into this repository.
+Before login, the page reads actual Linux sysfs USB descriptors, vendor/product
+IDs, strings and hotplug changes. Seeing a USB device does not verify a signature
+or prove possession of a signing key. USB cryptographic authentication is not
+implemented, and no device protocol or successful signer response is invented.
 
-The integration still requires identification of:
+The later goal is integration with the owner's ML-DSA-65/87 USB signer. Previously
+inspected artifacts contain UAGL cryptographic source, AArch64 assembly/objects/
+static libraries and worker code. The examined worker handles secret-key payloads
+through stdin/stdout; that does not establish a USB token key-handle protocol.
+No private-key material or crypto archive has been copied into this repository.
 
-- The actual USB firmware/device protocol and host transport interface.
-- The selected verifier ABI and host architecture strategy for both ML-DSA parameter sets.
-- An actual authentication entry point using that transport/verifier and explicit device/key enrollment, without restoring the removed login alternatives.
-- The corresponding Omarchy SDDM/Quickshell, installer, first-boot, reset and update patches listed in the source investigation.
-- Separate protected key release if preboot LUKS unlock is also to require the signer.
+Remaining integration decisions are:
 
-Place the real package recipes in `overlays/omarchy-pkgs/pkgbuilds/`, list their names in `overlays/omarchy-iso/builder/custom-local.packages`, and record existing-source edits in `patches/series.json`. The builder will compile and include them rather than substituting mirror packages of the same names.
+- The actual USB firmware protocol and host transport interface.
+- The verifier ABI and host architecture support for both ML-DSA parameter sets.
+- Device/key enrollment and the authentication entry point that will replace the
+  temporary password pathway.
+- Corresponding login, session, installer, reset and update policy changes.
+- Separate protected key release if the signer must also unlock preboot LUKS.
 
-The current ISO metadata says `authentication: removed-no-replacement`. The live ISO starts the disk installer directly on tty1 without a login or account. The installer retains storage/hardware setup and optional explicit LUKS disk encryption, then removes account/login facilities from the completed target. Its `multi-user.target` starts without a desktop or login session; it does not stage first-owner setup. A LUKS passphrase unlocks the disk independently of the future signer login.
+Real package recipes belong in `overlays/omarchy-pkgs/pkgbuilds/`, with package
+names in `overlays/omarchy-iso/builder/custom-local.packages` and source patches in
+`patches/series.json`. The builder can include those packages without fabricating
+a signer implementation.
 
-This intermediate stage does not implement or test the signer. See [NO_LOGIN_STAGE.md](NO_LOGIN_STAGE.md). Source preparation, compilation and ISO catalogue inspection do not demonstrate a working boot, disk installation or USB authentication on hardware.
+Optional LUKS disk encryption is independent of the temporary graphical login.
+It does not turn USB device reading into authentication. See [the current profile](NO_LOGIN_STAGE.md).
+Source checks and ISO creation do not demonstrate working USB hardware, graphical
+boot, installation or desktop operation; hardware and signer tests remain pending.

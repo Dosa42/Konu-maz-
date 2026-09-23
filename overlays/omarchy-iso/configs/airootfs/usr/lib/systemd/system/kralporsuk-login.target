@@ -1,0 +1,5 @@
+[Unit]
+Description=Single-account kralporsuk login
+Requires=basic.target kralporsuk-login.service
+After=basic.target
+AllowIsolate=yes

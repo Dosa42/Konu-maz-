@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Remove authentication/accounts after package and boot-image construction.
 
-Used by the ISO builder and by the installer before completing its disk target.
+Used by the ISO builder and installer; retain only the explicitly configured
+kralporsuk UID 0 account and its dedicated graphical login.
 """
 import argparse
 import json
@@ -10,6 +11,11 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
+
+
+ACCOUNT_NAME = 'kralporsuk'
+INITIAL_PASSWORD_HASH = '$6$zr8CH5FnkXvvy9j9$fMzYN7t5/f1yy2/vFowqgm.QocIEcQoG2v.JNZl0f0/M6JGg4w8e.MoD3ZtOlMFZx7oZzj9wAZlx4nLmwiGiS0'
+PROFILE = 'custom-single-login'
 
 
 DATABASES = ('passwd', 'shadow', 'group', 'gshadow', 'subuid', 'subgid')
@@ -25,7 +31,8 @@ pwunconv grpconv grpunconv faillock unix_chkpwd unix_update pam_timestamp_check
 pam_namespace_helper pamtester fprintd fprintd-enroll fprintd-verify
 pkexec pkcheck pkttyagent polkit-agent-helper-1 polkitd accounts-daemon
 sddm sddm-helper sddm-greeter sddm-greeter-qt6 gdm gdm-session-worker lightdm
-greetd tuigreet ly xdm xlogin xinit startx systemd-sysusers systemd-firstboot
+greetd tuigreet ly xdm xlogin xinit startx hyprlock swaylock gtklock
+systemd-sysusers systemd-firstboot
 systemd-logind systemd-homed systemd-userdbd systemd-userwork systemd-user-runtime-dir
 systemd-homework systemd-home-fallback-shell systemd-user-sessions
 systemd-sulogin-shell sulogin systemd-stdio-bridge systemd-machined machinectl
@@ -53,8 +60,8 @@ REMOVE_TREES = (
     'etc/userdb', 'usr/lib/userdb', 'var/lib/systemd/home', 'var/lib/AccountsService',
     'etc/cloud', 'usr/lib/cloud-init', 'var/lib/cloud',
     'etc/skel', 'etc/default/useradd', 'etc/login.defs',
-    'root', 'home', 'etc/.pwd.lock', 'run/systemd/system', 'run/systemd/user', 'run/sysusers.d', 'run/userdb', 'etc/systemd/system', 'etc/systemd/user',
-    'usr/lib/systemd/user', 'usr/share/omarchy/install/login',
+    'root', 'home', 'etc/.pwd.lock', 'run/systemd/system', 'run/systemd/user', 'run/sysusers.d', 'run/userdb', 'etc/systemd/system',
+    'usr/share/omarchy/install/login',
     'usr/share/omarchy/install/provisioning', 'etc/omarchy/provisioning',
     'usr/share/omarchy/install/config/lockscreen-pam.sh',
     'usr/share/omarchy/install/config/increase-lockout-limit.sh',
@@ -72,8 +79,8 @@ class Root:
         marker = self.child('usr/share/omarchy-iso/custom-build-status.json')
         if marker.is_symlink() or not marker.is_file():
             raise ValueError('Expected a regular profile marker')
-        if json.loads(marker.read_text()).get('profile') != 'custom-no-login':
-            raise ValueError('Build root does not carry the custom-no-login profile marker')
+        if json.loads(marker.read_text()).get('profile') != PROFILE:
+            raise ValueError('Build root does not carry the custom-single-login profile marker')
         if not self.child('usr/lib/systemd/systemd').is_file():
             raise ValueError('Expected the real pacstrap root containing systemd')
         self.removed = []
@@ -161,6 +168,37 @@ def numeric_udev_ownership(root):
     return sorted(changed)
 
 
+
+def install_single_account(root, *, installed):
+    """Create exactly the authorized UID/GID 0 identity after removing defaults."""
+    records = {
+        'passwd': (f'{ACCOUNT_NAME}:x:0:0:{ACCOUNT_NAME}:/root:/bin/bash\n', 0o644),
+        'shadow': (f'{ACCOUNT_NAME}:{INITIAL_PASSWORD_HASH}:20000:0:99999:7:::\n', 0o600),
+        'group': (f'{ACCOUNT_NAME}:x:0:\n', 0o644),
+        'gshadow': (f'{ACCOUNT_NAME}:!::\n', 0o600),
+    }
+    for name, (content, mode) in records.items():
+        destination = root.child('etc/' + name)
+        if destination.is_symlink():
+            raise ValueError('Unexpected account-file symlink: ' + name)
+        destination.write_text(content)
+        destination.chmod(mode)
+        os.chown(destination, 0, 0)
+        if destination.read_text().splitlines() != [content.rstrip('\n')]:
+            raise RuntimeError('Failed to configure the sole account: ' + name)
+    home = root.child('root')
+    if home.is_symlink():
+        raise ValueError('Account home must be a real directory')
+    home.mkdir(mode=0o700, exist_ok=True)
+    home.chmod(0o700)
+    os.chown(home, 0, 0)
+    # Fixed handoff, never a command supplied through a username or USB device.
+    config = root.child('etc/kralporsuk-login.json')
+    root.remove('etc/kralporsuk-login.json')
+    config.write_text(json.dumps({'mode': 'installed' if installed else 'live'}) + '\n')
+    config.chmod(0o600)
+
+
 def finalize(path, evidence, *, installed=False):
     root = Root(path)
     # Preserve account names only as external build evidence, never password hashes.
@@ -180,7 +218,7 @@ def finalize(path, evidence, *, installed=False):
     for relative in REMOVE_TREES:
         # The installed /home may be a mounted Btrfs subvolume. No user was
         # created there; keep the mountpoint and non-login service enablement.
-        if installed and relative in ('home', 'etc/systemd/system'):
+        if installed and relative in ('root', 'home', 'etc/systemd/system'):
             continue
         root.remove(relative)
     # Eliminate providers, tools and command-named support files in every install tree.
@@ -188,27 +226,39 @@ def finalize(path, evidence, *, installed=False):
         root.remove(root.relative(entry))
     # Delete service definitions rather than replacing them with /dev/null masks.
     units = root.child('usr/lib/systemd/system')
-    deleted_units = set()
-    unit_trees = ('usr/lib/systemd/system', 'etc/systemd/system')
+    # System and user managers have separate namespaces. Removing the system
+    # dbus-broker service must not remove the valid user's dbus.service alias.
+    deleted_units = {'system': set(), 'user': set()}
+    unit_trees = ('usr/lib/systemd/system', 'etc/systemd/system',
+                  'usr/lib/systemd/user', 'etc/systemd/user')
     for entry in [entry for tree in unit_trees for entry in root.files(tree) or ()]:
         if entry.is_symlink():
             continue
         text = entry.read_text(errors='replace')
         has_account = re.search(r'^\s*(?:User|Group|SocketUser|SocketGroup|SupplementaryGroups|DynamicUser)\s*=\s*\S+', text, re.M)
         if UNIT_RE.match(entry.name) or has_account:
-            deleted_units.add(entry.name)
+            namespace = 'user' if '/systemd/user/' in root.relative(entry) else 'system'
+            deleted_units[namespace].add(entry.name)
             root.remove(root.relative(entry))
     for tree in unit_trees:
+        namespace = 'user' if tree.endswith('/user') else 'system'
         for directory, dirs, _ in os.walk(root.child(tree), followlinks=False):
             for name in list(dirs):
-                if name.endswith('.d') and (UNIT_RE.match(name) or name[:-2] in deleted_units):
+                if name.endswith('.d') and (UNIT_RE.match(name) or name[:-2] in deleted_units[namespace]):
                     root.remove(root.relative(Path(directory) / name))
                     dirs.remove(name)
     # Vendor wants/aliases must not keep references to deleted units.
     for entry in [entry for tree in unit_trees for entry in root.files(tree) or ()]:
+        namespace = 'user' if '/systemd/user/' in root.relative(entry) else 'system'
         if entry.is_symlink() and (UNIT_RE.match(entry.name)
-                or Path(os.readlink(entry)).name in deleted_units):
+                or Path(os.readlink(entry)).name in deleted_units[namespace]):
             root.remove(root.relative(entry))
+    # Install this alias after package installation, avoiding a collision with
+    # the package-owned dbus.service symlink in ArchISO's early overlay stage.
+    if root.child('usr/lib/systemd/system/kralporsuk-dbus.service').is_file():
+        root.remove('etc/systemd/system/dbus.service')
+        root.remove('usr/lib/systemd/system/dbus.service')
+        root.child('usr/lib/systemd/system/dbus.service').symlink_to('kralporsuk-dbus.service')
     # No generators or user sessions may synthesize gettys, debug shells or users.
     for directory in ('usr/lib/systemd/system-generators', 'etc/systemd/system-generators'):
         for entry in list(root.files(directory) or ()):
@@ -221,6 +271,15 @@ def finalize(path, evidence, *, installed=False):
                 text = entry.read_text(errors='replace')
                 if re.search(r'(?:login1|home1|userdb1|machine1|Accounts|PolicyKit1|fprint|sddm)', text):
                     root.remove(root.relative(entry))
+                else:
+                    # The root identity was renamed, not duplicated. Keep
+                    # existing UID 0 D-Bus policies and activations meaningful.
+                    renamed = re.sub(
+                        r'\b(user|group)=("|\')root\2',
+                        lambda match: match[1] + '=' + match[2] + ACCOUNT_NAME + match[2], text)
+                    renamed = re.sub(r'(?m)^User=root\s*$', 'User=' + ACCOUNT_NAME, renamed)
+                    if renamed != text:
+                        entry.write_text(renamed)
     # Package hooks must not recreate local identities/provision the system at runtime.
     for directory in ('etc/pacman.d/hooks', 'usr/share/libalpm/hooks'):
         for entry in list(root.files(directory) or ()):
@@ -235,10 +294,11 @@ def finalize(path, evidence, *, installed=False):
     text = nss.read_text() if nss.exists() else ''
     text = re.sub(r'^\s*(?:passwd|group|shadow|gshadow|initgroups):.*\n?', '', text, flags=re.M)
     nss.write_text(text.rstrip() + '\npasswd: files\ngroup: files\nshadow: files\ngshadow: files\ninitgroups: files\n')
-    # The live image starts the installer directly; the installed system keeps
-    # normal multi-user startup with the login/account providers removed.
-    root.remove('usr/lib/systemd/system/omarchy-no-login.target')
-    default_target = 'multi-user.target' if installed else 'omarchy-installer.target'
+    # Both media require the same dedicated login before their next action.
+    # The live installer is invoked only by the authenticated supervisor.
+    for obsolete in ('omarchy-no-login.target', 'omarchy-installer.target', 'omarchy-installer.service'):
+        root.remove('usr/lib/systemd/system/' + obsolete)
+    default_target = 'kralporsuk-login.target'
     if not (units / default_target).is_file():
         raise RuntimeError(f'Required boot target missing: {default_target}')
     root.remove('etc/systemd/system/default.target')
@@ -253,7 +313,7 @@ def finalize(path, evidence, *, installed=False):
             if not entry.is_symlink() and entry.is_file():
                 mode = entry.stat().st_mode
                 if mode & (stat.S_ISUID | stat.S_ISGID):
-                    if root.relative(entry) in ('usr/bin/mount', 'usr/bin/umount'):
+                    if root.relative(entry) in ('usr/bin/mount', 'usr/bin/umount', 'usr/bin/seatd-launch'):
                         # Disk installation needs these tools. PID1 starts the
                         # installer as numeric UID 0, so set-id bits are unneeded.
                         entry.chmod(stat.S_IMODE(mode) & ~(stat.S_ISUID | stat.S_ISGID))
@@ -261,27 +321,29 @@ def finalize(path, evidence, *, installed=False):
                         continue
                     privileged.append(root.relative(entry))
                     root.remove(root.relative(entry))
-    for name in DATABASES:
+    install_single_account(root, installed=installed)
+    for name in ('subuid', 'subgid'):
         if root.child('etc/' + name).exists():
-            raise RuntimeError(f'Account database survived: {name}')
+            raise RuntimeError(f'Unexpected subordinate identity database survived: {name}')
     if root.child('etc/pam.d').exists() or root.child('usr/lib/security').exists():
         raise RuntimeError('PAM service configuration or modules survived')
     survivors = sorted(root.relative(entry) for entry in authentication_paths(root))
     if survivors:
         raise RuntimeError('Authentication/account paths survived: ' + ', '.join(survivors))
     result = {
-        'schema': 1, 'profile': 'custom-no-login', 'removed_accounts': accounts,
+        'schema': 2, 'profile': PROFILE, 'removed_accounts': accounts,
+        'configured_accounts': [{'name': ACCOUNT_NAME, 'uid': 0, 'gid': 0}],
         'removed_paths': sorted(set(root.removed)), 'removed_privileged_files': privileged,
         'default_target': default_target,
         'cleared_privileged_bits': sorted(cleared_privileges),
         'numeric_udev_rules': numeric_rules,
-        'installer': 'disk-target' if installed else 'direct-tty1-service',
-        'replacement_authentication': None, 'pam_deny_or_service_masks_added': False,
-        'scope': 'Installed target' if installed else 'Live installer filesystem; offline packages are sanitized after target installation.',
+        'installer': 'disk-target' if installed else 'after-authentication',
+        'replacement_authentication': 'single-account-shadow-password', 'pam_deny_or_service_masks_added': False,
+        'scope': 'Installed target' if installed else 'Live login and installer filesystem',
         'kernel_uid_zero_removed': False, 'vm_boot_tested': False,
     }
     Path(evidence).write_text(json.dumps(result, indent=2) + '\n')
-    print(f'Removed {len(accounts)} local accounts and {len(root.removed)} paths; evidence: {evidence}')
+    print(f'Removed {len(accounts)} package accounts and {len(root.removed)} paths; configured sole account {ACCOUNT_NAME} (UID 0); evidence: {evidence}')
 
 
 def wire(source, destination):

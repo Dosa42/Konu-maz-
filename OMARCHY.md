@@ -2,7 +2,7 @@
 
 This repository contains a manual GitHub Actions workflow and pinned source checkouts for building an actual x86_64 Omarchy installation ISO. The repository is private. The workflow stores artifacts in this repository and does not publish releases, Pages, containers, or a download website.
 
-**Current stage: restore the disk installer while keeping all existing login facilities and local account records removed, including root and system accounts. No replacement login is installed.** The live image starts the installer directly on tty1 through systemd. The completed disk installation is finalized with the same account/login removal policy and uses `multi-user.target`, without a desktop or login session. The live status is embedded at `/usr/share/omarchy-iso/custom-build-status.json` and recorded in the build manifest. This is not a completed signer-only installation image.
+**Current profile: a single graphical login for `kralporsuk`, UID 0 / GID 0, using the explicitly selected temporary password `0000`.** The live ISO and installed system default to `kralporsuk-login.target`. A GTK4 page under Cage/seatd verifies the sole `/etc/shadow` password hash through libxcrypt, without PAM, old login programs or autologin. Prelogin USB reading shows real Linux sysfs device information; it does not authenticate a USB signer. Successful login opens the live installer or the installed Hyprland session, respectively. The profile is recorded at `/usr/share/omarchy-iso/custom-build-status.json` and in the build manifest.
 
 ## Start the ISO build
 
@@ -52,7 +52,7 @@ The script preserves local source changes on the pinned HEAD. It refuses to rese
 
 For an existing source file, edit its local checkout and save the incremental diff as an additional patch under `patches/<source>/`. Add its filename to that source's ordered array in `patches/series.json`. Do not save a second patch that repeats changes already present in an earlier patch. New files can be placed directly under `overlays/<source>/` at their required source-relative path. GitHub Actions only receives tracked changes; local uncommitted edits inside a source checkout are not transferred by pushing the build repository alone.
 
-The supplied patches make the builder accept immutable image/Node inputs and unique output directories, use a pinned LazyVim starter revision, propagate a failed Neovim build command, identify the ISO as a development build, and integrate additional local packages. The removal and installer patches implement the stage described in [NO_LOGIN_STAGE.md](docs/NO_LOGIN_STAGE.md).
+The supplied patches make the builder accept immutable image/Node inputs and unique output directories, use a pinned LazyVim starter revision, propagate a failed Neovim build command, identify the ISO as a development build, and integrate additional local packages. The account cleanup, installer and graphical login changes implement the profile described in [NO_LOGIN_STAGE.md](docs/NO_LOGIN_STAGE.md).
 
 ### Firmware removed from an upstream package index
 
@@ -74,7 +74,7 @@ The Ristretto/Monokai plugin now comes from its available upstream `loctvl842/mo
 
 Every name in `custom-local.packages` is built locally and installed in **both the live ISO and the target installation**. The builder keeps the exact local artifact, excludes it from online package replacement, includes its declared runtime dependencies in the offline mirror and checks the final target dependency resolution. Use one unsplit package name per recipe/list entry. Custom build dependencies must be available in the configured Arch/Omarchy repositories or explicitly provided by an additional build integration.
 
-The custom package list is currently empty because no matching USB/PAM implementation has been established. No dummy signer, fabricated USB protocol, permissive authentication module or success stub is included.
+The signer integration remains separate from the temporary password login. No dummy signer, fabricated USB protocol, permissive authentication module or success stub is included.
 
 ## Build locally
 
@@ -87,12 +87,12 @@ Install and start Docker Engine on a Linux x86_64 host, then:
 
 Host tools include Git, curl, jq, Python 3, rsync, zstd and xorriso. The Arch container installs Archiso, the compiler/binutils/make toolchain, GRUB, image/package tools and the upstream Node/Neovim build dependencies. Additional PAM/USB development dependencies already listed are CMake, Ninja, pkgconf, Python, libusb, PAM and OpenSSL.
 
-The build needs network access to fetch source and packages. The live installer uses the bundled offline package archives for a real disk installation, including hardware configuration and Limine/UKI generation. The archives contain upstream account/login files; a final installation phase removes those files and account records from the target before completion. No first-owner setup or autologin is staged. Source/image/Node versions are pinned; rolling Arch/Omarchy package repositories and LazyVim's plugin resolution still prevent a claim of byte-for-byte reproducibility. Actual selected package names and versions are saved with each output.
+The build needs network access to fetch source and packages. The live installer uses the bundled offline package archives for a real disk installation, including hardware configuration and Limine/UKI generation. Packages may create their own identities during installation; the finalizer removes those account records and previous login providers, then writes only `kralporsuk` with UID 0 / GID 0 and its one password hash. There is no additional `root` alias, retained system account, first-owner setup or autologin. Source/image/Node versions are pinned; rolling Arch/Omarchy package repositories and LazyVim's plugin resolution still prevent a claim of byte-for-byte reproducibility. Actual selected package names and versions are saved with each output.
 
 The ISO plus package mirror/container layers need substantial disk space. Host setup reports the actual available storage; 35 GiB is an advisory budget, not an enforced estimate. Only on disposable GitHub-hosted runners does it remove the explicitly listed unrelated preinstalled Android/Haskell/.NET/CodeQL directories. It does not perform that cleanup on a local or self-hosted machine.
 
 ## Scope of the current result
 
-The live wizard asks for keyboard, hostname, timezone and disk layout. Optional disk encryption uses an explicitly chosen LUKS passphrase; this unlocks storage and does not create a root or user password. Cancellation or failure returns to fixed retry/reboot/power-off controls, without a shell. Retrying opens the wizard and disk confirmation again.
+The live wizard asks for keyboard, hostname, timezone and disk layout. Optional disk encryption uses an explicitly chosen LUKS passphrase, independently of the temporary graphical login password. Cancellation or failure returns to fixed retry/reboot/power-off controls, without a shell. Retrying opens the wizard and disk confirmation again.
 
-Linux numeric UID 0 remains available to PID 1 and the installer; no local root or system-account record is restored. Successful source checks or ISO creation do not establish that the installer or resulting system boots. The USB device protocol, key enrollment and authentication integration remain separate work before an image can be described as signer-only. The implementation map is in `docs/Omarchy_USB_signer_exacte_bronbestanden.md`.
+The sole account has full kernel root privilege; its name is `kralporsuk`, not a second identity alongside `root`. The installed desktop uses a native UID 0 systemd user manager. Applications that refuse UID 0 are not made to run by silently disabling their sandbox; full desktop application compatibility is not guaranteed. Logging out returns to the login page. Successful source checks or ISO creation do not establish that graphical boot, installation or the desktop works on hardware. The USB device protocol, key enrollment and authentication integration remain separate work before an image can be described as signer-only. [NO_LOGIN_STAGE.md](docs/NO_LOGIN_STAGE.md) describes the current design. `docs/Omarchy_USB_signer_exacte_bronbestanden.md` is historical upstream research; its SDDM/PAM proposals are not the current login design.

@@ -1,0 +1,21 @@
+[
+  "usr/lib/kralporsuk-login/auth.py",
+  "usr/lib/kralporsuk-login/greeter.py",
+  "usr/lib/kralporsuk-login/seed-profile.py",
+  "usr/lib/kralporsuk-login/supervisor.py",
+  "usr/lib/kralporsuk-login/usb_devices.py",
+  "usr/lib/kralporsuk-login/verify-lock.py",
+  "usr/lib/systemd/system/kralporsuk-dbus.service",
+  "usr/lib/systemd/system/kralporsuk-login.service",
+  "usr/lib/systemd/system/kralporsuk-login.target",
+  "usr/lib/systemd/system/kralporsuk-user-manager.service",
+  "usr/lib/systemd/user/kralporsuk-desktop.service",
+  "usr/lib/udev/rules.d/70-kralporsuk-usb.rules",
+  "usr/local/bin/kralporsuk-login",
+  "usr/local/bin/kralporsuk-session",
+  "usr/local/bin/kralporsuk-session-ready",
+  "usr/share/dbus-1/kralporsuk-system.conf",
+  "usr/share/kralporsuk-login/packages",
+  "usr/share/kralporsuk-session/LockService.qml",
+  "usr/share/kralporsuk-session/LockView.qml"
+]

@@ -21,6 +21,11 @@ INITCPIO_STRIPPER = AIROOTFS / "usr/lib/omarchy-no-login/strip-initramfs.py"
 SPEC = importlib.util.spec_from_file_location("remove_login_builder", SCRIPT)
 remove_login = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(remove_login)
+AUTH_SPEC = importlib.util.spec_from_file_location(
+    "kralporsuk_login_auth", AIROOTFS / "usr/lib/kralporsuk-login/auth.py"
+)
+login_auth = importlib.util.module_from_spec(AUTH_SPEC)
+AUTH_SPEC.loader.exec_module(login_auth)
 
 
 class RemoveLoginFilesystemTests(unittest.TestCase):
@@ -31,13 +36,15 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
         self.root = self.base / "root"
         self.root.mkdir()
         self.evidence = self.base / "removed-login.json"
-        self.write("usr/share/omarchy-iso/custom-build-status.json", '{"profile":"custom-no-login"}\n')
+        self.write("usr/share/omarchy-iso/custom-build-status.json", '{"profile":"custom-single-login"}\n')
         # The finalizer inspects filesystem state, not ELF execution. This file
         # is only its required fixture marker; no test pretends to boot systemd.
         self.write("usr/lib/systemd/systemd", "systemd filesystem fixture\n")
         self.write("usr/lib/systemd/system/multi-user.target", "[Unit]\nDescription=Fixture\n")
         self.write("usr/lib/systemd/system/omarchy-installer.target", "[Unit]\nRequires=omarchy-installer.service\n")
         self.write("usr/lib/systemd/system/omarchy-installer.service", "[Service]\nExecStart=/usr/bin/omarchy-installer-session\n")
+        self.write("usr/lib/systemd/system/kralporsuk-login.target", "[Unit]\nRequires=kralporsuk-login.service\n")
+        self.write("usr/lib/systemd/system/kralporsuk-login.service", "[Service]\nExecStart=/usr/local/bin/kralporsuk-login\n")
         (self.root / "usr/lib/systemd/system/default.target").symlink_to("multi-user.target")
         self.write("etc/passwd", "root:x:0:0:root:/root:/bin/bash\ndaemon:x:2:2:daemon:/:/usr/bin/nologin\n")
         self.write("etc/shadow", "root:fixture-password-hash:1:0:99999:7:::\n")
@@ -62,6 +69,25 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
         path = self.root / relative
         self.assertFalse(path.exists() or path.is_symlink(), relative)
 
+    def assert_single_account(self):
+        expected = {
+            "passwd": ["kralporsuk", "x", "0", "0", "kralporsuk", "/root", "/bin/bash"],
+            "group": ["kralporsuk", "x", "0", ""],
+            "gshadow": ["kralporsuk", "!", "", ""],
+        }
+        for database in ("passwd", "shadow", "group", "gshadow"):
+            path = self.root / "etc" / database
+            records = path.read_text().splitlines()
+            self.assertEqual(len(records), 1, database)
+            self.assertEqual(records[0].split(":", 1)[0], "kralporsuk", database)
+            self.assertEqual((path.stat().st_uid, path.stat().st_gid), (0, 0), database)
+            mode = 0o600 if database in ("shadow", "gshadow") else 0o644
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode, database)
+            if database in expected:
+                self.assertEqual(records[0].split(":"), expected[database], database)
+        for database in ("subuid", "subgid"):
+            self.assert_missing("etc/" + database)
+
     def test_command_named_completions_and_nested_helpers_are_removed(self):
         paths = [
             "usr/share/bash-completion/completions/su",
@@ -83,8 +109,7 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
         for relative in paths:
             self.assert_missing(relative)
             self.assertIn(relative, result["removed_paths"])
-        for name in ("passwd", "shadow", "group", "gshadow", "subuid", "subgid"):
-            self.assert_missing("etc/" + name)
+        self.assert_single_account()
         self.assert_missing("etc/pam.d")
         self.assert_missing("usr/lib/security")
         self.assert_missing("usr/lib/sysusers.d")
@@ -92,14 +117,17 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
         self.assert_missing("usr/lib/systemd/system/example.service")
         self.assertEqual(result["removed_accounts"], ["root", "daemon"])
         self.assertNotIn("fixture-password-hash", self.evidence.read_text())
-        self.assertEqual(result["default_target"], "omarchy-installer.target")
-        self.assertEqual(result["installer"], "direct-tty1-service")
-        self.assertIsNone(result["replacement_authentication"])
+        self.assertEqual(result["configured_accounts"], [{"name": "kralporsuk", "uid": 0, "gid": 0}])
+        self.assertEqual(result["default_target"], "kralporsuk-login.target")
+        self.assertEqual(result["installer"], "after-authentication")
+        self.assertEqual(result["replacement_authentication"], "single-account-shadow-password")
         self.assertFalse(result["vm_boot_tested"])
         self.assertFalse(result["pam_deny_or_service_masks_added"])
         units = self.root / "usr/lib/systemd/system"
-        self.assertEqual((units / "default.target").readlink(), Path("omarchy-installer.target"))
-        self.assertTrue((units / "omarchy-installer.service").is_file())
+        self.assertEqual((units / "default.target").readlink(), Path("kralporsuk-login.target"))
+        self.assertTrue((units / "kralporsuk-login.service").is_file())
+        self.assert_missing("usr/lib/systemd/system/omarchy-installer.service")
+        self.assert_missing("usr/lib/systemd/system/omarchy-installer.target")
         self.assert_missing("usr/lib/systemd/system/omarchy-no-login.target")
         nss = (self.root / "etc/nsswitch.conf").read_text()
         for name in ("passwd", "group", "shadow", "gshadow", "initgroups"):
@@ -114,6 +142,48 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
         result = self.finalize()
         self.assert_missing("opt/vendor/bin/useradd")
         self.assertIn("opt/vendor/bin/useradd", result["removed_paths"])
+
+    def test_actual_login_verifier_accepts_0000_and_rejects_wrong_password(self):
+        self.finalize()
+        self.assert_single_account()
+        # This calls the shipped verifier and the host's actual libcrypt through
+        # ctypes; neither the hash check nor the comparison is a test double.
+        self.assertTrue(login_auth.verify_password("0000", self.root))
+        for password in ("0001", "", "0000\x00ignored"):
+            with self.subTest(password=repr(password)):
+                self.assertFalse(login_auth.verify_password(password, self.root))
+        self.assertNotIn(remove_login.INITIAL_PASSWORD_HASH, self.evidence.read_text())
+        with (self.root / "etc/passwd").open("a") as passwd:
+            passwd.write("root:x:0:0:root:/root:/bin/bash\n")
+        with self.assertRaises(login_auth.AuthenticationError):
+            login_auth.verify_password("0000", self.root)
+
+    def test_legacy_account_backups_are_removed_not_retained_as_aliases(self):
+        obsolete = (
+            "etc/passwd-", "etc/shadow.pacnew", "etc/group.bak", "etc/gshadow~",
+            "usr/lib/passwd", "usr/lib/shadow.old",
+            "usr/share/factory/etc/passwd", "usr/share/factory/etc/group",
+            "var/lib/extrausers/passwd", "var/lib/extrausers/shadow",
+        )
+        for relative in obsolete:
+            self.write(relative, "root:old-account-record\n")
+        self.finalize()
+        self.assert_single_account()
+        for relative in obsolete:
+            self.assert_missing(relative)
+
+    def test_live_root_home_is_recreated_without_prior_live_credentials(self):
+        self.write("root/credentials", "previous-live-credential\n")
+        self.write("root/.config/legacy-login", "previous-live-config\n")
+        self.write("home/olduser/data", "old user files\n")
+        self.finalize()
+        home = self.root / "root"
+        self.assertTrue(home.is_dir())
+        self.assertEqual(list(home.iterdir()), [])
+        self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
+        self.assertEqual((home.stat().st_uid, home.stat().st_gid), (0, 0))
+        self.assert_missing("home")
+        self.assertEqual(json.loads((self.root / "etc/kralporsuk-login.json").read_text()), {"mode": "live"})
 
     def test_command_symlink_is_removed_without_touching_external_target(self):
         external = self.base / "external-data"
@@ -137,6 +207,24 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
         self.assertEqual(alias.readlink(), Path("libpam.so.0.85.1"))
         self.assertEqual(unrelated.read_text(), "unrelated data\n")
 
+    def test_system_bus_replacement_preserves_separate_user_bus(self):
+        self.write("usr/lib/systemd/system/dbus-broker.service", "[Service]\nUser=dbus\nExecStart=/usr/bin/dbus-broker-launch\n")
+        self.write("usr/lib/systemd/system/kralporsuk-dbus.service", "[Service]\nExecStart=/usr/bin/dbus-daemon\n")
+        self.write("usr/lib/systemd/user/dbus-broker.service", "[Service]\nExecStart=/usr/bin/dbus-broker-launch --scope user\n")
+        system_alias = self.root / "usr/lib/systemd/system/dbus.service"
+        user_alias = self.root / "usr/lib/systemd/user/dbus.service"
+        system_alias.symlink_to("dbus-broker.service")
+        user_alias.symlink_to("dbus-broker.service")
+        policy = self.write("usr/share/dbus-1/system.d/device.conf", '<busconfig><policy user="root"><allow own="device"/></policy></busconfig>\n')
+        activation = self.write("usr/share/dbus-1/system-services/device.service", "[D-BUS Service]\nName=device\nUser=root\nExec=/usr/bin/device\n")
+        self.finalize()
+        self.assert_missing("usr/lib/systemd/system/dbus-broker.service")
+        self.assertEqual(system_alias.readlink(), Path("kralporsuk-dbus.service"))
+        self.assertEqual(user_alias.readlink(), Path("dbus-broker.service"))
+        self.assertTrue(user_alias.is_file())
+        self.assertIn('user="kralporsuk"', policy.read_text())
+        self.assertIn("User=kralporsuk", activation.read_text())
+
     def test_installer_and_archinstall_library_survive_live_finalization(self):
         required = (
             "usr/bin/archinstall",
@@ -144,7 +232,10 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
             "usr/bin/pacstrap",
             "usr/bin/omarchy-iso-install",
             "usr/bin/omarchy-install-dashboard",
-            "usr/bin/omarchy-installer-session",
+            "usr/local/bin/omarchy-installer-session",
+            "usr/local/bin/kralporsuk-login",
+            "usr/lib/kralporsuk-login/auth.py",
+            "usr/lib/kralporsuk-login/supervisor.py",
             "usr/lib/python3.14/site-packages/archinstall/lib/installer.py",
             "usr/share/omarchy-iso/orchestrator/archinstall_adapter.py",
             "usr/share/omarchy-iso/setup-form.sh",
@@ -166,16 +257,16 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
                          "usr/share/omarchy/install/config/lockscreen-pam.sh"):
             self.assert_missing(relative)
 
-    def test_mount_tools_keep_execution_but_lose_setid_bits(self):
-        for name in ("mount", "umount"):
+    def test_mount_and_seat_tools_keep_execution_but_lose_setid_bits(self):
+        for name in ("mount", "umount", "seatd-launch"):
             self.write("usr/bin/" + name, "required mount executable\n").chmod(0o6755)
         self.write("usr/bin/unrelated-setid-tool", "privileged helper\n").chmod(0o4755)
         result = self.finalize()
-        for name in ("mount", "umount"):
+        for name in ("mount", "umount", "seatd-launch"):
             tool = self.root / "usr/bin" / name
             self.assertEqual(stat.S_IMODE(tool.stat().st_mode), 0o755)
             self.assertEqual(tool.read_text(), "required mount executable\n")
-        self.assertEqual(result["cleared_privileged_bits"], ["usr/bin/mount", "usr/bin/umount"])
+        self.assertEqual(result["cleared_privileged_bits"], ["usr/bin/mount", "usr/bin/seatd-launch", "usr/bin/umount"])
         self.assert_missing("usr/bin/unrelated-setid-tool")
         self.assertIn("usr/bin/unrelated-setid-tool", result["removed_privileged_files"])
 
@@ -198,8 +289,7 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
             'GROUP="$env{DYNAMIC_GROUP}", OWNER="%k"\n'
         ))
         self.assertEqual(result["numeric_udev_rules"], ["usr/lib/udev/rules.d/50-device.rules"])
-        self.assert_missing("etc/group")
-        self.assert_missing("etc/passwd")
+        self.assert_single_account()
 
     def test_installed_target_keeps_home_and_nonlogin_enablement(self):
         home = self.root / "home"
@@ -214,7 +304,8 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
         (wants / "storage.service").symlink_to("/usr/lib/systemd/system/storage.service")
         (wants / "sddm.service").symlink_to("/usr/lib/systemd/system/sddm.service")
         (self.root / "etc/systemd/system/default.target").symlink_to("/usr/lib/systemd/system/graphical.target")
-        self.write("root/credentials", "obsolete root home\n")
+        seed = self.write("root/.config/hypr/hyprland.conf", "prepared desktop seed\n")
+        seed_identity = seed.stat().st_ino
         result = self.finalize(installed=True)
         self.assertEqual(home.stat().st_ino, identity, "preserve the actual mountpoint directory")
         self.assertTrue((wants / "storage.service").is_symlink())
@@ -223,12 +314,36 @@ class RemoveLoginFilesystemTests(unittest.TestCase):
         self.assert_missing("etc/systemd/system/multi-user.target.wants/sddm.service")
         self.assert_missing("usr/lib/systemd/system/sddm.service")
         self.assert_missing("etc/systemd/system/default.target")
-        self.assert_missing("root")
-        self.assertEqual((self.root / "usr/lib/systemd/system/default.target").readlink(), Path("multi-user.target"))
-        self.assertEqual(result["default_target"], "multi-user.target")
+        self.assertEqual(seed.stat().st_ino, seed_identity)
+        self.assertEqual(seed.read_text(), "prepared desktop seed\n")
+        self.assertEqual(stat.S_IMODE((self.root / "root").stat().st_mode), 0o700)
+        self.assertEqual((self.root / "usr/lib/systemd/system/default.target").readlink(), Path("kralporsuk-login.target"))
+        self.assertEqual(result["default_target"], "kralporsuk-login.target")
         self.assertEqual(result["installer"], "disk-target")
-        for name in remove_login.DATABASES:
-            self.assert_missing("etc/" + name)
+        self.assert_single_account()
+        self.assertEqual(json.loads((self.root / "etc/kralporsuk-login.json").read_text()), {"mode": "installed"})
+
+    def test_user_unit_trees_retain_session_components_but_remove_authentication(self):
+        retained = (
+            "usr/lib/systemd/user/pipewire.service",
+            "usr/lib/systemd/user/pipewire-pulse.service",
+            "etc/systemd/user/desktop-helper.service",
+        )
+        for relative in retained:
+            self.write(relative, "[Service]\nExecStart=/usr/bin/true\n")
+        self.write("usr/lib/systemd/user/polkit.service", "[Service]\nExecStart=/usr/bin/polkitd\n")
+        self.write("etc/systemd/user/old-owner.service", "[Service]\nUser=daemon\nExecStart=/usr/bin/true\n")
+        wants = self.root / "etc/systemd/user/default.target.wants"
+        wants.mkdir()
+        (wants / "pipewire.service").symlink_to("/usr/lib/systemd/user/pipewire.service")
+        (wants / "polkit.service").symlink_to("/usr/lib/systemd/user/polkit.service")
+        self.finalize(installed=True)
+        for relative in retained:
+            self.assertTrue((self.root / relative).is_file(), relative)
+        self.assertTrue((wants / "pipewire.service").is_symlink())
+        self.assert_missing("usr/lib/systemd/user/polkit.service")
+        self.assert_missing("etc/systemd/user/old-owner.service")
+        self.assert_missing("etc/systemd/user/default.target.wants/polkit.service")
 
 
 class InitcpioPackingOrderTests(unittest.TestCase):

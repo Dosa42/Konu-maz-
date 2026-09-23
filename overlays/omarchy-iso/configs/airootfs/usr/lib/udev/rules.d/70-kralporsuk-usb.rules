@@ -1,0 +1,3 @@
+# Enable USB enumeration before the login page; do not mount or execute media.
+ACTION=="add", SUBSYSTEM=="usb", KERNEL=="usb[0-9]*", TEST=="authorized_default", ATTR{authorized_default}="1"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", TEST=="authorized", ATTR{authorized}="1"

@@ -1,15 +1,25 @@
 {
   "schema": 1,
-  "profile": "custom-no-login",
-  "authentication": "removed-no-replacement",
-  "local_accounts": "removed-including-root-and-system-accounts",
+  "profile": "custom-single-login",
+  "authentication": "single-shadow-password-via-libxcrypt-without-pam",
+  "local_accounts": "sole-kralporsuk-uid0-gid0-no-root-alias-or-system-accounts",
+  "account": {
+    "name": "kralporsuk",
+    "uid": 0,
+    "gid": 0
+  },
+  "password_stage": "explicitly-selected-temporary-password",
   "usb_signer_integration": "not-installed",
-  "boot_target": "omarchy-installer.target",
-  "installer": "direct-tty1-service-without-login",
-  "installed_boot_target": "multi-user.target",
-  "installed_authentication": "accounts-and-login-removed-before-completion",
+  "prelogin_usb": "real-linux-sysfs-descriptors-ids-strings-and-hotplug",
+  "boot_target": "kralporsuk-login.target",
+  "installed_boot_target": "kralporsuk-login.target",
+  "graphical_login": "gtk4-on-cage-with-seatd",
+  "live_after_login": "preserved-disk-installer",
+  "installed_after_login": "hyprland-with-native-uid0-user-manager",
+  "logout": "return-to-graphical-login",
+  "autologin": false,
   "disk_unlock": "optional-explicit-luks-passphrase-independent-of-login",
   "vm_boot_tested": false,
   "usb_signer_tested": false,
-  "description": "Development ISO with a direct disk installer and no local account records or login routes. The completed target retains multi-user startup without a desktop or login. Linux UID 0 and required shared-library ABIs remain; cryptographic login is a later change."
+  "description": "Development ISO with one root-privileged kralporsuk account and graphical password login. USB device information is readable before login; USB cryptographic authentication remains unimplemented. Login starts the live installer or installed Hyprland session. Boot and full UID 0 desktop application compatibility are not established."
 }

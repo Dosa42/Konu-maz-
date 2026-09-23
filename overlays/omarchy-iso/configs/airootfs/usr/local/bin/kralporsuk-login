@@ -1,0 +1,5 @@
+#!/usr/bin/python
+"""Start the fixed, root-owned login implementation."""
+import os
+
+os.execv("/usr/bin/python", ["/usr/bin/python", "-I", "/usr/lib/kralporsuk-login/supervisor.py"])

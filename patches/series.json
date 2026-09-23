@@ -9,7 +9,8 @@
     "0006-single-boot-entry.patch",
     "0007-remove-stock-kernel-preset.patch",
     "0008-restore-accountless-installation.patch",
-    "0009-restore-installer-wizard.patch"
+    "0009-restore-installer-wizard.patch",
+    "0010-single-kralporsuk-login.patch"
   ],
   "omarchy-pkgs": [
     "0001-pinned-nvim-source.patch",

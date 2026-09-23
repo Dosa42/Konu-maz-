@@ -1,0 +1,11 @@
+# Runtime dependencies for the one graphical login and its authenticated session.
+python
+python-gobject
+gtk4
+ttf-dejavu
+cage
+seatd
+libxcrypt
+dbus
+dbus-broker
+dbus-broker-units

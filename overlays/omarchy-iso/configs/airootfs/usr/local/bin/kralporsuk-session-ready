@@ -1,0 +1,30 @@
+#!/bin/bash
+# Hyprland calls this once after creating its real Wayland display.
+set -euo pipefail
+[[ ${USER:-} == kralporsuk && $EUID == 0 && -n ${WAYLAND_DISPLAY:-} ]]
+failed() {
+  local status=$?
+  printf 'Omarchy session initialization failed with status %s. See the journal.\n' \
+    "$status" >"$XDG_RUNTIME_DIR/kralporsuk-session-error"
+  /usr/bin/hyprctl dispatch exit
+  exit "$status"
+}
+trap failed ERR
+
+# Keep the original UWSM app daemon and launchers working against the real
+# user manager; only UWSM's logind-based compositor startup is replaced.
+/usr/bin/systemctl --user import-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE \
+  DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE \
+  PATH OMARCHY_PATH QT_QPA_PLATFORM QT_QPA_PLATFORMTHEME XCURSOR_SIZE HYPRCURSOR_SIZE
+/usr/bin/dbus-update-activation-environment --systemd \
+  WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE DISPLAY XDG_CURRENT_DESKTOP \
+  XDG_SESSION_DESKTOP XDG_SESSION_TYPE PATH OMARCHY_PATH
+/usr/bin/systemctl --user start graphical-session.target
+/usr/bin/systemctl --user start pipewire.service pipewire-pulse.service wireplumber.service
+/usr/bin/systemctl --user start wayland-wm-app-daemon.service
+
+/usr/bin/uwsm-app -- omarchy-launch-shell
+/usr/bin/uwsm-app -- omarchy-hyprland-monitor-watch
+/usr/bin/uwsm-app -- fcitx5 -d
+/usr/bin/omarchy-hook post-boot
+touch "$XDG_RUNTIME_DIR/kralporsuk-session-ready"

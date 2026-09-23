@@ -1,79 +1,76 @@
-# Intermediate stage: installer without accounts or login
+# Current profile: one graphical login and the preserved installer
 
-The requested order is removal of existing accounts/login first, cryptographic
-login later. The live installer is retained and starts directly on tty1 through
-systemd. Removing the installer and replacing normal startup with an empty target
-in the earlier revision was an error; this revision restores installation.
-No temporary login password, signer stub, denial-only PAM module, hidden account
-or service mask is introduced.
+This file retains its historical name. The current authorized profile replaces
+an intermediate no-account stage with exactly one root-privileged account:
+`kralporsuk`, UID 0 / GID 0, temporary password `0000`. The password is represented
+by a hash in the source configuration and the resulting `/etc/shadow`; no separate
+`root` alias or additional system-account records are retained.
 
-## Live boot and installation
+## Login and session flow
 
-- The live default is `omarchy-installer.target`. It starts basic system services,
-  device discovery and `omarchy-installer.service` with a controlling tty1.
-  There is no getty, login program, autologin or interactive root shell.
-- The wizard retains keyboard, hostname, timezone, disk selection and disk-layout
-  confirmation. It does not ask for a username, local-account password or root
-  credentials. Optional encryption asks for a separate LUKS disk passphrase;
-  that passphrase unlocks storage and is not installed as a login credential.
-- The real installer uses the bundled packages, configures supported hardware,
-  filesystems and Limine/UKI boot files. It does not stage first-owner provisioning,
-  SSH account access or desktop autologin.
-- The dashboard retains installation progress and the successful-install reboot
-  prompt. Cancellation or failure returns to fixed retry, reboot and power-off
-  controls. Retry opens the wizard and confirmation again; it never silently
-  reuses a previously confirmed disk layout. No shell is offered on failure.
-- Before installation completes, the target finalizer removes package-created
-  accounts and login facilities. The installed default is `multi-user.target`,
-  with no desktop, getty or login session. It does not restart the live installer.
+Both the live image and installed system default to `kralporsuk-login.target`.
+A GTK4 login page runs under Cage with seatd. It verifies the sole account's
+shadow hash through libxcrypt, without PAM, an existing display manager, getty,
+console login or autologin.
 
-## Removal applied to the image and installation
+The page can read USB information before authentication: actual sysfs descriptors,
+vendor/product IDs, strings and device arrival/removal. This is device inspection,
+not USB cryptographic authentication. No token protocol, signature verification
+or successful authentication is fabricated.
 
-The finalizer removes local passwd/shadow/group/gshadow/subuid/subgid databases,
-backups and factory copies, including root and system-account records. It removes
-login/account-management commands, PAM configuration and modules, SSH server and
-display-manager entry points, authentication providers, account-creation hooks,
-user homes and their systemd units/drop-ins. Account lookup uses only the now-absent
-local databases; NSS account synthesis and userdb entry points are removed.
+After password authentication, the live image opens the preserved disk installer.
+The installed system opens the real Hyprland desktop using a native UID 0 systemd
+user manager. Logging out returns to the graphical login page.
 
-Device-rule ownership names are converted to their original numeric IDs before
-account deletion so device discovery does not depend on those records. Remaining
-SUID/SGID executables are removed; required `mount` and `umount` remain with their
-privilege bits cleared. The installer already runs under numeric UID 0.
+## Installation
 
-The final `omarchy-no-login` mkinitcpio hook strips account/login providers and
-interactive recovery-shell branches from the generated live and target initramfs.
-Boot failure paths halt instead of opening a shell, and continuation is fixed to
-`/sbin/init`. Explicitly selected LUKS disk unlocking remains available.
+The installer retains keyboard, hostname, timezone, disk selection and disk-layout
+confirmation. Optional LUKS encryption uses an explicitly entered disk passphrase,
+independent of the graphical login password. The installer does not create another
+user, root alias, first-owner setup, SSH login or autologin configuration.
 
-The live image has one normal BIOS Syslinux entry and one UEFI GRUB entry. Other
-profile entries, UEFI shell and memory-test routes are removed. GRUB EFI images
-use `--disable-cli` to remove editing, command-line and rescue interfaces without
-adding a bootloader user or password.
+The real package, filesystem, hardware and Limine/UKI setup remains in place.
+Packages may temporarily create accounts during installation; the finalizer removes
+those identities and old login facilities before writing the sole `kralporsuk`
+account and group. The completed target uses the same graphical login policy.
 
-## Boundaries and evidence
+The dashboard retains progress and the successful-install reboot prompt.
+Cancellation or failure offers fixed retry/reboot/power-off controls. Retrying
+opens the wizard and disk confirmation again instead of silently reusing an old
+confirmed layout. It does not offer a shell.
 
-- Linux still uses numeric credentials, including UID 0 for PID 1 and the direct
-  installer. Deleting account records does not remove kernel privilege semantics.
-- Required shared-library ABIs, including `libpam.so` where linked by systemd,
-  remain. PAM configurations, authentication modules and login callers are removed;
-  this is not a claim that every related instruction disappears from every library.
-- Shell interpreters remain for fixed boot/build/installer scripts. There is no
-  supplied interactive shell entry point. The medium is not signed or made
-  immutable by this work; protection against replacing its contents is separate.
-- Offline package archives retain upstream payloads. The removal policy is applied
-  after those packages are installed, rather than asserted for the archives.
-- The manual build workflow does not install an OS. Running the live installer
-  writes the disk layout explicitly selected and confirmed in its wizard.
+## Retained removal policy
 
-The ISO build writes `removed-login.json` next to the ISO, and the build manifest
-hashes it. The completed installation records its own removal evidence at
-`/usr/share/omarchy-iso/installed-no-login-evidence.json`. Reports contain removed
-account names, paths, cleared privilege bits and the selected default target, not
-password hashes. Unexpected source structure or surviving account/login providers
-stop the relevant build or installation phase.
+Previous local account databases, backups and factory copies are removed before
+the final account is written. Previous PAM configuration/modules, console login,
+SSH server, display-manager/authentication providers, account-creation hooks and
+their service entry points remain removed. Required graphical session services
+are configured for the sole numeric UID/GID rather than additional identities.
 
-Patch application, syntax checks and ISO catalogue inspection are not a boot or
-installation test. `vm_boot_tested` and `usb_signer_tested` remain false unless real
-tests are performed and recorded. The earlier successful inert-image build does
-not validate this restored installer.
+The final initramfs hook still strips login/account providers and recovery-shell
+branches from both the live and installed initramfs. Boot failure paths halt
+instead of opening a shell; continuation is fixed to `/sbin/init`. Explicitly
+selected LUKS disk unlocking remains available.
+
+The live medium retains one normal BIOS Syslinux entry and one UEFI GRUB entry.
+Alternative boot entries, UEFI shell and memory-test routes remain removed. GRUB
+EFI images use `--disable-cli` without adding a bootloader account or password.
+
+## Limits and evidence
+
+- `kralporsuk` is the root-privileged account: UID 0 semantics remain fully active.
+  Account naming does not reduce that privilege.
+- Applications that refuse UID 0 are not forced to run by silently disabling
+  their sandbox. Full desktop application compatibility is not guaranteed.
+- Required shared-library ABIs remain, including `libpam.so` where linked by
+  systemd. The new password verifier does not use PAM.
+- Offline package archives retain upstream payloads. Final account/login policy
+  is applied after package installation, not asserted for every archive.
+- The boot medium is not signed or made immutable by this work; protection against
+  replacing it is separate. USB inspection does not implement USB signer login.
+
+Build reports describe final account/login cleanup and the configured default
+target. A successful build, source check or ISO catalogue inspection does not
+validate graphical boot, USB hardware, disk installation or a desktop session.
+`vm_boot_tested` and `usb_signer_tested` remain false until actual tests are recorded.
+Earlier successful builds with a different login policy do not validate this one.

@@ -33,7 +33,7 @@ def main():
         'repository_commit': repository_commit,
         'run_id': os.environ.get('GITHUB_RUN_ID'),
         'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT'),
-        'profile': 'custom-no-login',
+        'profile': 'custom-single-login',
         'authentication': json.loads((ROOT / 'sources/omarchy-iso/configs/airootfs/usr/share/omarchy-iso/custom-build-status.json').read_text()),
         'source_date_epoch': int(os.environ['SOURCE_DATE_EPOCH']),
         'locked_inputs': lock,
@@ -53,4 +53,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

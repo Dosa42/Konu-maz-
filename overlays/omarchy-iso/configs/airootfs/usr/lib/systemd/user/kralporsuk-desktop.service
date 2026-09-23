@@ -1,0 +1,18 @@
+[Unit]
+Description=Authenticated kralporsuk Omarchy desktop
+Requires=dbus.socket
+After=dbus.socket
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/seatd-launch -- /usr/bin/start-hyprland -- --i-am-really-stupid --config /root/.config/hypr/hyprland.lua
+Environment=LIBSEAT_BACKEND=seatd
+StandardInput=null
+# seatd opens the current VT itself. Taking tty1 as a second controlling
+# terminal would block behind, or hang up, the login supervisor.
+StandardOutput=journal
+StandardError=journal
+KillMode=control-group
+TimeoutStopSec=20
+Restart=no
+# No WantedBy=: a boot or a user-manager restart never opens a desktop.

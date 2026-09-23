@@ -1,0 +1,28 @@
+[Unit]
+Description=Single-account kralporsuk graphical login
+Requires=systemd-udevd.service
+Wants=systemd-udev-trigger.service systemd-vconsole-setup.service
+After=local-fs.target systemd-udevd.service systemd-udev-trigger.service systemd-vconsole-setup.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/kralporsuk-login
+RuntimeDirectory=kralporsuk-login
+RuntimeDirectoryMode=0700
+WorkingDirectory=/
+UMask=0077
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+KillMode=control-group
+TimeoutStopSec=15
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=2
+LimitCORE=0

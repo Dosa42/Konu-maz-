@@ -1,0 +1,50 @@
+#!/bin/bash
+# Called only by the successful kralporsuk login supervisor.
+set -euo pipefail
+
+if (( EUID != 0 )) || [[ $(id -un) != kralporsuk ]]; then
+  echo 'The desktop requires the authenticated kralporsuk UID 0 account.' >&2
+  exit 1
+fi
+
+export HOME=/root USER=kralporsuk LOGNAME=kralporsuk SHELL=/bin/bash
+export XDG_RUNTIME_DIR=/run/user/0
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=Hyprland XDG_SESSION_DESKTOP=Hyprland
+export LIBSEAT_BACKEND=seatd
+unset WAYLAND_DISPLAY DISPLAY HYPRLAND_INSTANCE_SIGNATURE SEATD_SOCK XDG_SESSION_ID
+source /usr/share/omarchy/default/bash/env-bootstrap
+source /usr/share/omarchy/default/uwsm/default
+
+cleanup() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  # The manager owns the compositor, its seatd instance and every desktop app.
+  # A failed cleanup must not be reported as a clean logout.
+  if ! /usr/bin/systemctl stop kralporsuk-user-manager.service; then
+    echo 'Could not stop the authenticated desktop processes.' >&2
+    exit 78
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+/usr/bin/systemctl start kralporsuk-user-manager.service
+/usr/bin/systemctl --user start dbus.socket
+/usr/bin/systemctl --user import-environment HOME USER LOGNAME SHELL PATH \
+  OMARCHY_PATH TERMINAL EDITOR LIBSEAT_BACKEND XDG_SESSION_TYPE \
+  XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP
+# --wait ends only when the actual compositor service has stopped. No shell,
+# session auto-restart or fallback display manager is available here.
+/usr/bin/systemctl --user --wait start kralporsuk-desktop.service
+if [[ -f $XDG_RUNTIME_DIR/kralporsuk-session-error ]]; then
+  cat "$XDG_RUNTIME_DIR/kralporsuk-session-error" >&2
+  exit 1
+fi
+if [[ ! -f $XDG_RUNTIME_DIR/kralporsuk-session-ready ]]; then
+  echo 'The desktop stopped before Omarchy session initialization completed.' >&2
+  exit 1
+fi

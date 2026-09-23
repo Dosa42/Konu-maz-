@@ -1,0 +1,207 @@
+diff --git a/builder/build-iso.sh b/builder/build-iso.sh
+index a5c36cc..22f4a3e 100755
+--- a/builder/build-iso.sh
++++ b/builder/build-iso.sh
+@@ -157,6 +157,11 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
+ # drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
+ # live initramfs.
+ arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
++# The same real login dependencies are installed live and bundled for the target.
++KRALPORSUK_LOGIN_PACKAGES=()
++read_custom_package_list /builder/kralporsuk-login.packages KRALPORSUK_LOGIN_PACKAGES
++arch_packages+=("${KRALPORSUK_LOGIN_PACKAGES[@]}")
++install -Dm644 /builder/kralporsuk-login.packages "$build_cache_dir/airootfs/usr/share/kralporsuk-login/packages"
+ arch_packages+=("${CUSTOM_LOCAL_PACKAGES[@]}")
+ printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
+ 
+diff --git a/configs/airootfs/root/configurator b/configs/airootfs/root/configurator
+index b6d3956..663c042 100644
+--- a/configs/airootfs/root/configurator
++++ b/configs/airootfs/root/configurator
+@@ -240,7 +240,7 @@ disk_encryption_form() {
+   [[ $encrypt_installation == true ]] || return 0
+   local confirmation
+   step "Choose the disk encryption passphrase"
+-  say "This unlocks the disk at boot. No login account will be created."
++  say "This unlocks the disk at boot. The separate login account is kralporsuk."
+   while true; do
+     password=$(gum input --password --prompt "Disk passphrase> ") || abort
+     confirmation=$(gum input --password --prompt "Confirm disk passphrase> ") || abort
+@@ -710,7 +710,7 @@ run_partition_execute() {
+     "custom_commands": [],
+     "omarchy_install": {
+         "mode": "protected",
+-        "no_accounts": true,
++        "account_name": "kralporsuk",
+         "defer_provisioning": false,
+         "target_mount": "/mnt",
+         "boot": {
+@@ -939,12 +939,14 @@ select_installation() {
+   done
+ }
+ 
+-# Choose machine settings and a disk; no account or first-boot owner setup.
++# Choose machine settings and a disk; the sole account is fixed by the image.
+ install_target="full_disk"
+ wait_for_stable_terminal
+ greeter
+ keyboard_form
+ machine_form
++step "This image uses the single account kralporsuk"
++say "The login password is independent of optional disk encryption."
+ disk_form
+ select_installation
+ disk_encryption_form
+@@ -1004,7 +1006,7 @@ cat <<-_EOF_ >user_configuration.json
+     "custom_commands": [],
+     "omarchy_install": {
+         "mode": "full_disk",
+-        "no_accounts": true,
++        "account_name": "kralporsuk",
+         "defer_provisioning": false,
+         "target_mount": "/mnt",
+         "boot": {
+diff --git a/configs/airootfs/usr/share/omarchy-iso/orchestrator/context.py b/configs/airootfs/usr/share/omarchy-iso/orchestrator/context.py
+index 5212fcc..eb37b09 100644
+--- a/configs/airootfs/usr/share/omarchy-iso/orchestrator/context.py
++++ b/configs/airootfs/usr/share/omarchy-iso/orchestrator/context.py
+@@ -25,7 +25,7 @@ class InstallContext:
+     user_credentials: dict
+     arch_config_path: Path
+     omarchy_install: dict[str, Any]
+-    no_accounts: bool = True
++    no_account_provisioning: bool = True
+     defer_provisioning: bool = False
+ 
+     target: Path = Path("/mnt")
+@@ -57,9 +57,11 @@ class InstallContext:
+             kernel = (omarchy_install.get("storage") or {}).get("kernel") or _default_kernel()
+             user_configuration["kernels"] = [kernel]
+ 
+-        # This custom ISO has one fixed installation profile. External/legacy
++        # Archinstall must not provision accounts: the finalizer creates the sole
++        # fixed kralporsuk record after package setup. External/legacy
+         # input cannot select account creation or deferred owner provisioning.
+-        omarchy_install["no_accounts"] = True
++        omarchy_install.pop("no_accounts", None)
++        omarchy_install["account_name"] = "kralporsuk"
+         omarchy_install["defer_provisioning"] = False
+         supplied_credentials = json.loads(creds_path.read_text()) if creds_path.exists() else {}
+         user_credentials = {"users": []}
+@@ -104,7 +106,7 @@ class InstallContext:
+             user_credentials=user_credentials,
+             arch_config_path=arch_config_path,
+             omarchy_install=omarchy_install,
+-            no_accounts=True,
++            no_account_provisioning=True,
+             defer_provisioning=False,
+             state_dir=state_dir,
+         )
+diff --git a/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py b/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py
+index 7bab0e0..9d9a975 100644
+--- a/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py
++++ b/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py
+@@ -52,7 +52,7 @@ def build_phases(ctx: InstallContext):
+         ("Finalizing Limine boot",     finalize_limine_boot),
+         ("Configuring DNS resolver",   configure_dns_resolver),
+         ("Validating boot setup",      validate_boot),
+-        ("Removing target accounts and login", sanitize_installed_target),
++        ("Configuring sole kralporsuk login", sanitize_installed_target),
+         ("Creating factory snapshot",  create_factory_snapshot),
+     ]
+ 
+@@ -64,7 +64,7 @@ def main() -> int:
+         error(f"Configuration error: {e}")
+         return 2
+ 
+-    info(f"Installing Omarchy without local accounts or login → {ctx.target}")
++    info(f"Installing Omarchy with the sole kralporsuk login → {ctx.target}")
+ 
+     from .phases_impl import (
+         boost_cpu_governor,
+diff --git a/configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py b/configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py
+index ddaacb4..eb84be9 100644
+--- a/configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py
++++ b/configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py
+@@ -722,7 +722,8 @@ def _runtime_package_list(ctx: InstallContext) -> list[str]:
+         "omarchy-settings",
+         "omarchy-nvim",
+     }
+-    for raw in base_pkgs_file.read_text().splitlines():
++    login_packages = Path("/usr/share/kralporsuk-login/packages")
++    for raw in [*base_pkgs_file.read_text().splitlines(), *login_packages.read_text().splitlines()]:
+         s = raw.strip()
+         if not s or s.startswith("#"):
+             continue
+@@ -1151,7 +1152,7 @@ def prepare_accountless_initramfs(ctx: InstallContext) -> None:
+ 
+ 
+ def sanitize_installed_target(ctx: InstallContext) -> None:
+-    """Remove package-created account/login facilities before any snapshot."""
++    """Install the dedicated login and replace package accounts before snapshot."""
+     target = ctx.target.resolve()
+     if not ctx.target.is_absolute() or target == Path("/") or not _is_mountpoint(target):
+         raise RuntimeError(f"Refusing to finalize an invalid install target: {ctx.target}")
+@@ -1160,9 +1161,34 @@ def sanitize_installed_target(ctx: InstallContext) -> None:
+     for mountpoint in reversed(ctx.state.get("bind_mounts", [])):
+         subprocess.run(["umount", mountpoint], check=True)
+     ctx.state["bind_mounts"] = []
++    # Files originate from the built live filesystem; never execute USB input.
++    assets = json.loads(Path("/usr/share/kralporsuk-login/install-assets.json").read_text())
++    for relative in assets:
++        rel = Path(relative)
++        if rel.is_absolute() or ".." in rel.parts:
++            raise RuntimeError(f"Invalid login asset path: {relative}")
++        source = Path("/") / rel
++        destination = target / rel
++        if source.is_symlink() or not source.is_file():
++            raise RuntimeError(f"Login asset is not a regular file: {source}")
++        for parent in destination.parents:
++            if parent == target:
++                break
++            if parent.is_symlink():
++                raise RuntimeError(f"Symlinked login asset destination: {parent}")
++        destination.parent.mkdir(parents=True, exist_ok=True)
++        destination.unlink(missing_ok=True)
++        shutil.copy2(source, destination)
++    # Seed the real Omarchy home before /etc/skel is removed. This does not
++    # create a second identity or run the upstream first-owner account setup.
++    subprocess.run([
++        "/usr/bin/python", "/usr/lib/kralporsuk-login/seed-profile.py", str(target),
++    ], check=True)
+     marker = target / "usr/share/omarchy-iso/custom-build-status.json"
+     marker.parent.mkdir(parents=True, exist_ok=True)
+-    marker.write_text(json.dumps({"profile": "custom-no-login", "no_accounts": True}) + "\n")
++    status = json.loads(Path("/usr/share/omarchy-iso/custom-build-status.json").read_text())
++    status["installation_mode"] = "installed"
++    marker.write_text(json.dumps(status, indent=2) + "\n")
+     evidence = ctx.state_dir / "installed-no-login-evidence.json"
+     subprocess.run([
+         "/usr/bin/python", "/usr/lib/omarchy-installer/remove-login.py",
+diff --git a/configs/profiledef.sh b/configs/profiledef.sh
+index 9baec32..16479e6 100644
+--- a/configs/profiledef.sh
++++ b/configs/profiledef.sh
+@@ -1,10 +1,10 @@
+ #!/usr/bin/env bash
+ # shellcheck disable=SC2034
+ 
+-iso_name="omarchy-custom-no-login"
++iso_name="omarchy-kralporsuk"
+ iso_label="OMARCHY_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
+ iso_publisher="Dosa42 private custom build"
+-iso_application="Omarchy Custom No-Login Development Stage"
++iso_application="Omarchy Kralporsuk Single-Account Development Stage"
+ iso_version="$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y.%m.%d)"
+ install_dir="arch"
+ buildmodes=('iso')
+@@ -30,6 +30,9 @@ airootfs_image_tool_options=(
+ )
+ bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
+ file_permissions=(
++  ["/usr/local/bin/kralporsuk-login"]="0:0:755"
++  ["/usr/local/bin/kralporsuk-session"]="0:0:755"
++  ["/usr/local/bin/kralporsuk-session-ready"]="0:0:755"
+   ["/usr/local/bin/omarchy-installer-session"]="0:0:755"
+   ["/usr/share/omarchy-iso/configurator"]="0:0:755"
+   ["/usr/lib/omarchy-installer/remove-login.py"]="0:0:755"

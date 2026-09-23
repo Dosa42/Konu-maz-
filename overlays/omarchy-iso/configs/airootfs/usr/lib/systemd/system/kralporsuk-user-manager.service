@@ -1,0 +1,20 @@
+[Unit]
+Description=Desktop service manager for the authenticated kralporsuk session
+After=dbus.service kralporsuk-login.service
+BindsTo=kralporsuk-login.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/lib/systemd/systemd --user
+Environment=HOME=/root USER=kralporsuk LOGNAME=kralporsuk SHELL=/bin/bash
+Environment=XDG_RUNTIME_DIR=/run/user/0
+RuntimeDirectory=user/0
+RuntimeDirectoryMode=0700
+Delegate=yes
+TasksMax=infinity
+KillMode=mixed
+TimeoutStopSec=30
+Restart=no
+# Deliberately no User=, PAMName=, login session or [Install] section.
+# Only the password-authenticated supervisor starts this UID 0 process.

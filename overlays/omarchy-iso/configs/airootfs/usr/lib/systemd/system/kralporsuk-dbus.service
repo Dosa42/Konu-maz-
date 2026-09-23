@@ -1,0 +1,14 @@
+[Unit]
+Description=D-Bus system bus for the sole kralporsuk account
+Documentation=man:dbus-daemon(1)
+Requires=dbus.socket
+After=dbus.socket
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/dbus-daemon --config-file=/usr/share/dbus-1/kralporsuk-system.conf --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+ExecReload=/usr/bin/dbus-send --system --print-reply --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig
+OOMScoreAdjust=-900
+Restart=on-failure
+# No service account or PAM session: the only account is UID 0 kralporsuk.
