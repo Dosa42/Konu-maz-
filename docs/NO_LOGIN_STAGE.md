@@ -1,78 +1,79 @@
-# Intermediate stage: remove existing accounts and login
+# Intermediate stage: installer without accounts or login
 
-The owner's requested order is removal first, cryptographic authentication later.
-This profile deliberately has no usable login or installer. No temporary password,
-signer stub, PAM denial module, replacement login, hidden account or service mask
-is introduced.
+The requested order is removal of existing accounts/login first, cryptographic
+login later. The live installer is retained and starts directly on tty1 through
+systemd. Removing the installer and replacing normal startup with an empty target
+in the earlier revision was an error; this revision restores installation.
+No temporary login password, signer stub, denial-only PAM module, hidden account
+or service mask is introduced.
 
-## What the build changes
+## Live boot and installation
 
-1. Keep package compilation and boot-image generation in the build environment.
-   Build-container identities are not accounts in the resulting ISO.
-2. Run the `omarchy-no-login` mkinitcpio install hook last. It removes account
-   records, PAM service configuration/modules and login tools from the generated
-   initramfs; physically removes pre/post-mount shell branches and replaces boot
-   failure shell calls with a halt. It fixes the continuation to `/sbin/init`.
-   The BusyBox binary is checked for compiled-in login/account applets.
-3. Generate one BIOS Syslinux entry and one UEFI GRUB entry. Remove the other
-   profile entries and inherited alternatives. Omit UEFI shell and memory-test
-   packages from the live root. Build both GRUB EFI images with `--disable-cli`,
-   which removes access to editing, command-line and rescue interfaces without
-   configuring an authentication prompt or a bootloader user.
-4. Invoke `builder/remove-login.py` from the **pinned** mkarchiso source, after
-   package operations and copying boot files, immediately before rootfs packing.
-   This deletes all local passwd/shadow/group/gshadow/subuid/subgid records and
-   their backups/factory copies, including root and system-account records.
-5. Delete the supplied login/account-management commands, PAM configurations and
-   modules, SSH server entry points, display-manager/authentication providers,
-   privilege-entry executables, account-creation hooks, home directories and
-   installer/provisioning entry points. Remove their systemd units and drop-ins.
-   Command-name removal covers all of `/usr` and `/opt`, including shell
-   completions and helpers in nonstandard locations. Account-dependent units
-   are also removed. Clear existing local enablement.
-6. Restrict account lookup to the now-absent local files; remove NSS systemd
-   account synthesis and userdb service entry points. Delete SUID/SGID files
-   remaining in `/usr` and `/opt`.
-7. Set `omarchy-no-login.target` as the default target, without normal service,
-   desktop, getty or installer dependencies. Remove the initramfs build helpers
-   from the final rootfs. No boot-time root helper is installed.
+- The live default is `omarchy-installer.target`. It starts basic system services,
+  device discovery and `omarchy-installer.service` with a controlling tty1.
+  There is no getty, login program, autologin or interactive root shell.
+- The wizard retains keyboard, hostname, timezone, disk selection and disk-layout
+  confirmation. It does not ask for a username, local-account password or root
+  credentials. Optional encryption asks for a separate LUKS disk passphrase;
+  that passphrase unlocks storage and is not installed as a login credential.
+- The real installer uses the bundled packages, configures supported hardware,
+  filesystems and Limine/UKI boot files. It does not stage first-owner provisioning,
+  SSH account access or desktop autologin.
+- The dashboard retains installation progress and the successful-install reboot
+  prompt. Cancellation or failure returns to fixed retry, reboot and power-off
+  controls. Retry opens the wizard and confirmation again; it never silently
+  reuses a previously confirmed disk layout. No shell is offered on failure.
+- Before installation completes, the target finalizer removes package-created
+  accounts and login facilities. The installed default is `multi-user.target`,
+  with no desktop, getty or login session. It does not restart the live installer.
 
-The full normal Omarchy installer/desktop does **not** operate in this intermediate
-stage. It must be integrated with the owner's future authentication before it is
-enabled again. Simply removing a username does not make its former services work;
-this stage does not start them with substitute identities.
+## Removal applied to the image and installation
 
-## Exact boundaries
+The finalizer removes local passwd/shadow/group/gshadow/subuid/subgid databases,
+backups and factory copies, including root and system-account records. It removes
+login/account-management commands, PAM configuration and modules, SSH server and
+display-manager entry points, authentication providers, account-creation hooks,
+user homes and their systemd units/drop-ins. Account lookup uses only the now-absent
+local databases; NSS account synthesis and userdb entry points are removed.
 
-- Linux still uses numeric credentials, including UID 0 for PID 1. Deleting root's
-  account record does not remove the kernel's UID 0 semantics or systemd's internal
-  name for that UID. No local root account/password or root login is retained.
-- General shared-library ABIs needed to load installed programs, including
-  `libpam.so` where linked by systemd, are retained. PAM service configurations,
-  authentication modules and login entry points are removed. This is not a claim
-  that every authentication-related machine instruction vanished from every library.
-- The shell interpreter remains for noninteractive ArchISO boot scripts. Provided
-  interactive entry points are removed. The boot medium is not signed or made
-  immutable by this change; replacing its bootloader/initramfs remains outside
-  this stage. No claim of protection against modified media is made.
-- Offline package archives remain inert build inputs. They contain upstream
-  package payloads and are **not** an installed system with this removal applied.
-  The ISO's executable installer is removed; nothing automatically installs those
-  packages or recreates their accounts at boot.
-- The normal manual workflow remains manual. This change does not flash a device,
-  overwrite an installed OS, enroll a key, or add the later cryptographic login.
+Device-rule ownership names are converted to their original numeric IDs before
+account deletion so device discovery does not depend on those records. Remaining
+SUID/SGID executables are removed; required `mount` and `umount` remain with their
+privilege bits cleared. The installer already runs under numeric UID 0.
 
-## Evidence and verification
+The final `omarchy-no-login` mkinitcpio hook strips account/login providers and
+interactive recovery-shell branches from the generated live and target initramfs.
+Boot failure paths halt instead of opening a shell, and continuation is fixed to
+`/sbin/init`. Explicitly selected LUKS disk unlocking remains available.
 
-Every real ISO build writes `removed-login.json` next to the ISO. It records the
-actual account names removed, removed paths and privilege-entry files. It contains
-no password hashes. The build manifest requires and hashes that report. Unexpected
-mkarchiso/mkinitcpio structure or failure to remove requested paths stops the build;
-the build does not silently fall back to the original authentication configuration.
-Removal and the final provider check scan the same trees with the same predicate;
-any surviving provider paths are listed explicitly in the build error.
+The live image has one normal BIOS Syslinux entry and one UEFI GRUB entry. Other
+profile entries, UEFI shell and memory-test routes are removed. GRUB EFI images
+use `--disable-cli` to remove editing, command-line and rescue interfaces without
+adding a bootloader user or password.
 
-Source preparation, patch application and syntax checks do not demonstrate a
-successful boot. `vm_boot_tested` and `usb_signer_tested` remain false unless a real
-boot/authentication test is performed and recorded. The older successful build
-35571598298 predates this removal stage.
+## Boundaries and evidence
+
+- Linux still uses numeric credentials, including UID 0 for PID 1 and the direct
+  installer. Deleting account records does not remove kernel privilege semantics.
+- Required shared-library ABIs, including `libpam.so` where linked by systemd,
+  remain. PAM configurations, authentication modules and login callers are removed;
+  this is not a claim that every related instruction disappears from every library.
+- Shell interpreters remain for fixed boot/build/installer scripts. There is no
+  supplied interactive shell entry point. The medium is not signed or made
+  immutable by this work; protection against replacing its contents is separate.
+- Offline package archives retain upstream payloads. The removal policy is applied
+  after those packages are installed, rather than asserted for the archives.
+- The manual build workflow does not install an OS. Running the live installer
+  writes the disk layout explicitly selected and confirmed in its wizard.
+
+The ISO build writes `removed-login.json` next to the ISO, and the build manifest
+hashes it. The completed installation records its own removal evidence at
+`/usr/share/omarchy-iso/installed-no-login-evidence.json`. Reports contain removed
+account names, paths, cleared privilege bits and the selected default target, not
+password hashes. Unexpected source structure or surviving account/login providers
+stop the relevant build or installation phase.
+
+Patch application, syntax checks and ISO catalogue inspection are not a boot or
+installation test. `vm_boot_tested` and `usb_signer_tested` remain false unless real
+tests are performed and recorded. The earlier successful inert-image build does
+not validate this restored installer.

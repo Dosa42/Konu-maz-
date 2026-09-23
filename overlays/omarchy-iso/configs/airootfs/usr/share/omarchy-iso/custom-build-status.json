@@ -4,6 +4,12 @@
   "authentication": "removed-no-replacement",
   "local_accounts": "removed-including-root-and-system-accounts",
   "usb_signer_integration": "not-installed",
-  "boot_target": "omarchy-no-login.target",
-  "description": "Intermediate development image: no installed login routes, local account records or interactive installer. Linux UID 0 and required shared-library ABIs remain; cryptographic login is a later change."
+  "boot_target": "omarchy-installer.target",
+  "installer": "direct-tty1-service-without-login",
+  "installed_boot_target": "multi-user.target",
+  "installed_authentication": "accounts-and-login-removed-before-completion",
+  "disk_unlock": "optional-explicit-luks-passphrase-independent-of-login",
+  "vm_boot_tested": false,
+  "usb_signer_tested": false,
+  "description": "Development ISO with a direct disk installer and no local account records or login routes. The completed target retains multi-user startup without a desktop or login. Linux UID 0 and required shared-library ABIs remain; cryptographic login is a later change."
 }

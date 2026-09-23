@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Remove live authentication/accounts after package and boot-image construction.
+"""Remove authentication/accounts after package and boot-image construction.
 
-Runs in the build container, never as a boot service or a PAM helper.
+Used by the ISO builder and by the installer before completing its disk target.
 """
 import argparse
 import json
@@ -16,7 +16,7 @@ DATABASES = ('passwd', 'shadow', 'group', 'gshadow', 'subuid', 'subgid')
 AUTH_TREES = ('usr', 'opt')
 COMMANDS = set('''
 agetty getty login remote-login loginctl su runuser sudo sudoedit visudo doas
-archinstall cloud-init cloud-init-per systemd-userdb-load-credentials
+cloud-init cloud-init-per systemd-userdb-load-credentials
 adduser deluser addgroup delgroup telnetd in.telnetd rlogind in.rlogind rshd in.rshd
 sshd sshd-session sshd-auth sftp-server ssh-keysign dropbear dropbearmulti
 passwd chpasswd newusers useradd usermod userdel groupadd groupmod groupdel
@@ -31,6 +31,10 @@ systemd-homework systemd-home-fallback-shell systemd-user-sessions
 systemd-sulogin-shell sulogin systemd-stdio-bridge systemd-machined machinectl
 homectl userdbctl systemd-getty-generator systemd-debug-generator
 systemd-run0 run0
+omarchy-provision-owner omarchy-provision-first-run omarchy-system-factory-reset
+omarchy-provision-user omarchy-system-factory-reset-finish omarchy-apply-lock
+omarchy-setup-security-fingerprint omarchy-setup-security-fido2
+omarchy-setup-security-sshd omarchy-sudo-passwordless
 '''.split())
 UNIT_RE = re.compile(
     r'^(?:getty|serial-getty|console-getty|container-getty|console-shell|autovt|'
@@ -50,9 +54,11 @@ REMOVE_TREES = (
     'etc/cloud', 'usr/lib/cloud-init', 'var/lib/cloud',
     'etc/skel', 'etc/default/useradd', 'etc/login.defs',
     'root', 'home', 'etc/.pwd.lock', 'run/systemd/system', 'run/systemd/user', 'run/sysusers.d', 'run/userdb', 'etc/systemd/system', 'etc/systemd/user',
-    'usr/lib/systemd/user', 'usr/share/omarchy/install',
-    'usr/share/omarchy-iso/orchestrator', 'usr/share/omarchy-iso/setup-form.sh',
-    'usr/lib/omarchy-no-login', 'usr/lib/initcpio/install/omarchy-no-login',
+    'usr/lib/systemd/user', 'usr/share/omarchy/install/login',
+    'usr/share/omarchy/install/provisioning', 'etc/omarchy/provisioning',
+    'usr/share/omarchy/install/config/lockscreen-pam.sh',
+    'usr/share/omarchy/install/config/increase-lockout-limit.sh',
+    'usr/share/omarchy/install/user/first-run/setup-fingerprint.hook',
     'usr/lib/syslinux', 'usr/share/edk2-shell',
 )
 
@@ -122,19 +128,47 @@ def authentication_paths(root):
     for directory in AUTH_TREES:
         for entry in root.files(directory) or ():
             if (entry.name in COMMANDS or entry.name.startswith('libnss_systemd.so')
-                    or entry.name.startswith('libnss_compat.so')
-                    or entry.name.startswith('omarchy-iso-')
-                    or entry.name in ('omarchy-cidata-load', 'omarchy-install-dashboard')):
+                    or entry.name.startswith('libnss_compat.so')):
                 yield entry
 
 
-def finalize(path, evidence):
+def numeric_udev_ownership(root):
+    """Preserve hardware rules after removing their named account databases."""
+    identities = {}
+    for kind, database in (('OWNER', 'passwd'), ('GROUP', 'group')):
+        path = root.child('etc/' + database)
+        if path.is_symlink():
+            raise ValueError(f'Symlinked identity database: {database}')
+        identities[kind] = {'root': '0'}
+        if path.is_file():
+            for line in path.read_text().splitlines():
+                fields = line.split(':')
+                if len(fields) > 2 and fields[2].isdigit():
+                    identities[kind][fields[0]] = fields[2]
+    changed = []
+    assignment = re.compile(r'\b(OWNER|GROUP)(\s*(?::=|=)\s*)"([^"\n]+)"')
+    for directory in ('etc/udev/rules.d', 'usr/lib/udev/rules.d'):
+        for entry in root.files(directory) or ():
+            if entry.is_symlink() or not entry.name.endswith('.rules'):
+                continue
+            original = entry.read_text()
+            updated = assignment.sub(
+                lambda match: match[1] + match[2] + '"' +
+                identities[match[1]].get(match[3], match[3]) + '"', original)
+            if updated != original:
+                entry.write_text(updated)
+                changed.append(root.relative(entry))
+    return sorted(changed)
+
+
+def finalize(path, evidence, *, installed=False):
     root = Root(path)
     # Preserve account names only as external build evidence, never password hashes.
     old_passwd = root.child('etc/passwd')
     if old_passwd.is_symlink():
         raise ValueError('Symlinked passwd evidence is not read')
     accounts = [line.split(':', 1)[0] for line in old_passwd.read_text().splitlines()] if old_passwd.is_file() else []
+    numeric_rules = numeric_udev_ownership(root)
     for directory in ('etc', 'usr/lib', 'var/lib/extrausers', 'usr/share/factory/etc'):
         base = root.child(directory)
         if not base.is_dir():
@@ -144,20 +178,19 @@ def finalize(path, evidence):
                    for n in DATABASES for suffix in ('-', '.', '~')):
                 root.remove(root.relative(entry))
     for relative in REMOVE_TREES:
+        # The installed /home may be a mounted Btrfs subvolume. No user was
+        # created there; keep the mountpoint and non-login service enablement.
+        if installed and relative in ('home', 'etc/systemd/system'):
+            continue
         root.remove(relative)
-    # Remove the installed Python installer that otherwise provisions fresh accounts.
-    for directory in root.child('usr/lib').glob('python*/site-packages'):
-        if directory.is_symlink():
-            raise ValueError('Symlinked Python package directory')
-        for entry in directory.glob('archinstall*'):
-            root.remove(root.relative(entry))
     # Eliminate providers, tools and command-named support files in every install tree.
     for entry in list(authentication_paths(root)):
         root.remove(root.relative(entry))
     # Delete service definitions rather than replacing them with /dev/null masks.
     units = root.child('usr/lib/systemd/system')
     deleted_units = set()
-    for entry in list(root.files('usr/lib/systemd/system') or ()):
+    unit_trees = ('usr/lib/systemd/system', 'etc/systemd/system')
+    for entry in [entry for tree in unit_trees for entry in root.files(tree) or ()]:
         if entry.is_symlink():
             continue
         text = entry.read_text(errors='replace')
@@ -165,13 +198,14 @@ def finalize(path, evidence):
         if UNIT_RE.match(entry.name) or has_account:
             deleted_units.add(entry.name)
             root.remove(root.relative(entry))
-    for directory, dirs, _ in os.walk(units, followlinks=False):
-        for name in list(dirs):
-            if name.endswith('.d') and (UNIT_RE.match(name) or name[:-2] in deleted_units):
-                root.remove(root.relative(Path(directory) / name))
-                dirs.remove(name)
+    for tree in unit_trees:
+        for directory, dirs, _ in os.walk(root.child(tree), followlinks=False):
+            for name in list(dirs):
+                if name.endswith('.d') and (UNIT_RE.match(name) or name[:-2] in deleted_units):
+                    root.remove(root.relative(Path(directory) / name))
+                    dirs.remove(name)
     # Vendor wants/aliases must not keep references to deleted units.
-    for entry in list(root.files('usr/lib/systemd/system') or ()):
+    for entry in [entry for tree in unit_trees for entry in root.files(tree) or ()]:
         if entry.is_symlink() and (UNIT_RE.match(entry.name)
                 or Path(os.readlink(entry)).name in deleted_units):
             root.remove(root.relative(entry))
@@ -201,20 +235,30 @@ def finalize(path, evidence):
     text = nss.read_text() if nss.exists() else ''
     text = re.sub(r'^\s*(?:passwd|group|shadow|gshadow|initgroups):.*\n?', '', text, flags=re.M)
     nss.write_text(text.rstrip() + '\npasswd: files\ngroup: files\nshadow: files\ngshadow: files\ninitgroups: files\n')
-    # No normal installer, desktop, account-dependent services or shell start here.
-    target = units / 'omarchy-no-login.target'
-    root.remove(root.relative(target))
-    target.write_text('[Unit]\nDescription=Omarchy development stage without accounts or login\nDefaultDependencies=no\nAllowIsolate=yes\n')
+    # The live image starts the installer directly; the installed system keeps
+    # normal multi-user startup with the login/account providers removed.
+    root.remove('usr/lib/systemd/system/omarchy-no-login.target')
+    default_target = 'multi-user.target' if installed else 'omarchy-installer.target'
+    if not (units / default_target).is_file():
+        raise RuntimeError(f'Required boot target missing: {default_target}')
+    root.remove('etc/systemd/system/default.target')
     default = units / 'default.target'
     root.remove(root.relative(default))
-    default.symlink_to('omarchy-no-login.target')
+    default.symlink_to(default_target)
     # Remove SUID/SGID entry points remaining outside named provider packages.
     privileged = []
+    cleared_privileges = []
     for directory in ('usr', 'opt'):
         for entry in list(root.files(directory) or ()):
             if not entry.is_symlink() and entry.is_file():
                 mode = entry.stat().st_mode
                 if mode & (stat.S_ISUID | stat.S_ISGID):
+                    if root.relative(entry) in ('usr/bin/mount', 'usr/bin/umount'):
+                        # Disk installation needs these tools. PID1 starts the
+                        # installer as numeric UID 0, so set-id bits are unneeded.
+                        entry.chmod(stat.S_IMODE(mode) & ~(stat.S_ISUID | stat.S_ISGID))
+                        cleared_privileges.append(root.relative(entry))
+                        continue
                     privileged.append(root.relative(entry))
                     root.remove(root.relative(entry))
     for name in DATABASES:
@@ -228,9 +272,12 @@ def finalize(path, evidence):
     result = {
         'schema': 1, 'profile': 'custom-no-login', 'removed_accounts': accounts,
         'removed_paths': sorted(set(root.removed)), 'removed_privileged_files': privileged,
-        'default_target': 'omarchy-no-login.target',
+        'default_target': default_target,
+        'cleared_privileged_bits': sorted(cleared_privileges),
+        'numeric_udev_rules': numeric_rules,
+        'installer': 'disk-target' if installed else 'direct-tty1-service',
         'replacement_authentication': None, 'pam_deny_or_service_masks_added': False,
-        'scope': 'Live root filesystem; offline package archives remain build inputs, not an enabled installer.',
+        'scope': 'Installed target' if installed else 'Live installer filesystem; offline packages are sanitized after target installation.',
         'kernel_uid_zero_removed': False, 'vm_boot_tested': False,
     }
     Path(evidence).write_text(json.dumps(result, indent=2) + '\n')
@@ -275,7 +322,7 @@ def wire(source, destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='mode', required=True)
-    for name in ('wire', 'finalize'):
+    for name in ('wire', 'finalize', 'finalize-installed'):
         command = sub.add_parser(name)
         command.add_argument('source')
         command.add_argument('output')
@@ -283,7 +330,7 @@ def main():
     if args.mode == 'wire':
         wire(args.source, args.output)
     else:
-        finalize(args.source, args.output)
+        finalize(args.source, args.output, installed=args.mode == 'finalize-installed')
 
 
 if __name__ == '__main__':

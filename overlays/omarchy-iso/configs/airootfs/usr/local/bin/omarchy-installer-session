@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# A fixed installer session owned by systemd; no login program or interactive shell.
+set -uo pipefail
+umask 077
+
+[[ $(tty 2>/dev/null) == /dev/tty1 ]] || exit 1
+
+export HOME=/run/omarchy-install-config
+export OMARCHY_PATH=/usr/share/omarchy
+export OMARCHY_INSTALL=$OMARCHY_PATH/install
+export OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log
+export OMARCHY_DASHBOARD_TTY=/dev/tty1
+export OMARCHY_UI_INTERACTIVE=yes
+# The dashboard draws failures, then returns to our fixed retry/power menu.
+export OMARCHY_UI_FAILURE_ACTION=exit
+export OMARCHY_UI_DEFER_PROVISIONING=no
+export CLICOLOR_FORCE=1 FORCE_COLOR=1
+export LESSSECURE=1 LESSHISTFILE=/dev/null LESSOPEN= LESSCLOSE=
+
+trap ':' INT
+trap 'exit 143' TERM HUP
+
+reset_terminal() {
+  stty sane </dev/tty 2>/dev/null || true
+  printf '\033[0m\033[?25h' >/dev/tty
+}
+trap reset_terminal EXIT
+
+set_palette() {
+  printf '\e]P01a1b26\e]P1f7768e\e]P29ece6a\e]P3e0af68\e]P47aa2f7\e]P5bb9af7\e]P67dcfff\e]P7a9b1d6\e]P8414868\e]P9f7768e\e]PA9ece6a\e]PBe0af68\e]PC7aa2f7\e]PDbb9af7\e]PE7dcfff\e]PFc0caf5\033[0m\033[2J\033[H'
+}
+
+run_installer() (
+  # This subshell is invoked as a plain command below so errexit remains active.
+  # A failed prerequisite or cancelled wizard returns to the supervisor menu.
+  set -e
+  trap - INT
+  mkdir -p "$HOME" /var/log /run/omarchy-install
+  touch "$OMARCHY_INSTALL_LOG_FILE"
+  cd "$HOME"
+
+  OMARCHY_MIRROR=$(cat /usr/share/omarchy-iso/mirror)
+  export OMARCHY_MIRROR
+  if [[ -f /usr/share/omarchy-iso/iso-ref ]]; then
+    OMARCHY_ISO_REF=$(cat /usr/share/omarchy-iso/iso-ref)
+    export OMARCHY_ISO_REF
+  fi
+  if [[ -f /usr/share/omarchy-iso/package-targets ]]; then
+    # shellcheck disable=SC1091
+    source /usr/share/omarchy-iso/package-targets
+    export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
+  fi
+  if [[ -f /usr/share/omarchy-iso/install-debug ]]; then
+    export OMARCHY_INSTALL_DEBUG=1
+  fi
+
+  export COLUMNS="$(tput cols 2>/dev/null || printf '80')"
+  export LINES="$(tput lines 2>/dev/null || printf '24')"
+  set_palette
+  exec > >(tee >(sed -u 's/\x1b\[[0-9;?]*[A-Za-z]//g' >>"$OMARCHY_INSTALL_LOG_FILE") 2>/dev/null) 2>/dev/tty
+
+  if [[ ${OMARCHY_INSTALL_DEBUG:-} == 1 ]]; then
+    printf '%s\n' '=== Omarchy ISO debug build ==='
+    [[ ! -f /usr/share/omarchy-iso/build-info ]] || cat /usr/share/omarchy-iso/build-info
+    pacman -Q omarchy-settings omarchy-keyring 2>/dev/null || true
+  fi
+
+  # Wait for the boot-time device trigger before offering installation disks.
+  udevadm settle --timeout=60
+
+  # Every attempt runs the wizard anew. A cancelled/failed attempt must never
+  # silently reuse a previously confirmed disk layout.
+  rm -f -- user_configuration.json user_credentials.json user_full_name.txt \
+    user_email_address.txt user_encrypt_installation.txt authorized_keys \
+    tailscale_authkey defer-provisioning /run/omarchy-install/state.json
+  /usr/share/omarchy-iso/configurator
+
+  /usr/local/bin/omarchy-install-dashboard \
+    "$OMARCHY_INSTALL_LOG_FILE" \
+    /run/omarchy-install/state.json \
+    -- \
+    /usr/local/bin/omarchy-iso-install \
+      --config "$HOME/user_configuration.json" \
+      --creds "$HOME/user_credentials.json" \
+      --full-name-file "$HOME/user_full_name.txt" \
+      --email-file "$HOME/user_email_address.txt" \
+      --encrypt-file "$HOME/user_encrypt_installation.txt"
+)
+
+choose_action() {
+  local status=$1 choice
+  local -a choices=(Reboot 'Power off')
+  if (( status != 0 )); then
+    choices=('Retry installer' "${choices[@]}")
+  fi
+
+  if command -v gum >/dev/null 2>&1; then
+    choice=$(gum choose --height 4 --header 'What would you like to do?' \
+      "${choices[@]}" </dev/tty 2>/dev/tty) || choice=
+    printf '%s' "$choice"
+    return
+  fi
+
+  # Keep the power/retry controls usable even if the TUI itself cannot start.
+  if (( status != 0 )); then
+    printf '\n1: Retry installer   2: Reboot   3: Power off\n> ' >/dev/tty
+  else
+    printf '\n2: Reboot   3: Power off\n> ' >/dev/tty
+  fi
+  if ! IFS= read -r choice </dev/tty; then
+    sleep 1
+    return
+  fi
+  case "$choice" in
+    1) (( status == 0 )) || printf '%s' 'Retry installer' ;;
+    2) printf '%s' Reboot ;;
+    3) printf '%s' 'Power off' ;;
+  esac
+}
+
+power_action() {
+  local action=$1
+  if systemctl --no-block "$action"; then
+    printf '\n%s requested.\n' "$action" >/dev/tty
+    # PID 1 normally stops this service during this interval.
+    sleep 2
+  else
+    printf '\nCould not request %s. Choose an action to try again.\n' "$action" >/dev/tty
+  fi
+}
+
+# A service restart after a crash must request confirmation before rerunning
+# the wizard. This marker deliberately lives outside RuntimeDirectory.
+status=1
+if [[ ! -e /run/omarchy-installer-session-started ]]; then
+  : >/run/omarchy-installer-session-started
+  run_installer
+  status=$?
+fi
+
+while true; do
+  reset_terminal
+  if (( status == 0 )); then
+    printf '\nInstallation completed. Remove the installation medium before booting the installed system.\n' >/dev/tty
+  else
+    printf '\nInstaller stopped (status %s). No command shell is available.\n' "$status" >/dev/tty
+    printf 'Retry opens the disk selection and confirmation steps again.\n' >/dev/tty
+  fi
+  action=$(choose_action "$status")
+  case "$action" in
+    'Retry installer')
+      run_installer
+      status=$?
+      ;;
+    Reboot) power_action reboot ;;
+    'Power off') power_action poweroff ;;
+  esac
+done

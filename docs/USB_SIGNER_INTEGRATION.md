@@ -8,11 +8,12 @@ The integration still requires identification of:
 
 - The actual USB firmware/device protocol and host transport interface.
 - The selected verifier ABI and host architecture strategy for both ML-DSA parameter sets.
-- An actual PAM entry point using that transport/verifier and locally managed account/key registration.
+- An actual authentication entry point using that transport/verifier and explicit device/key enrollment, without restoring the removed login alternatives.
 - The corresponding Omarchy SDDM/Quickshell, installer, first-boot, reset and update patches listed in the source investigation.
 - Separate protected key release if preboot LUKS unlock is also to require the signer.
 
 Place the real package recipes in `overlays/omarchy-pkgs/pkgbuilds/`, list their names in `overlays/omarchy-iso/builder/custom-local.packages`, and record existing-source edits in `patches/series.json`. The builder will compile and include them rather than substituting mirror packages of the same names.
 
-The current ISO metadata says `authentication: removed-no-replacement`. This is the explicitly requested intermediate stage: existing local accounts and login facilities are removed before the signer is integrated. It does not mean the signer works. See [NO_LOGIN_STAGE.md](NO_LOGIN_STAGE.md). Successful source preparation, compilation or ISO catalogue inspection does not demonstrate USB authentication on hardware.
+The current ISO metadata says `authentication: removed-no-replacement`. The live ISO starts the disk installer directly on tty1 without a login or account. The installer retains storage/hardware setup and optional explicit LUKS disk encryption, then removes account/login facilities from the completed target. Its `multi-user.target` starts without a desktop or login session; it does not stage first-owner setup. A LUKS passphrase unlocks the disk independently of the future signer login.
 
+This intermediate stage does not implement or test the signer. See [NO_LOGIN_STAGE.md](NO_LOGIN_STAGE.md). Source preparation, compilation and ISO catalogue inspection do not demonstrate a working boot, disk installation or USB authentication on hardware.

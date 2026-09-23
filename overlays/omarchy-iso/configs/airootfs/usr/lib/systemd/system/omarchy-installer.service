@@ -1,0 +1,31 @@
+[Unit]
+Description=Omarchy disk installer on tty1
+Requires=systemd-udevd.service
+Wants=systemd-udev-trigger.service systemd-vconsole-setup.service
+After=local-fs.target systemd-udevd.service systemd-udev-trigger.service systemd-vconsole-setup.service
+Conflicts=shutdown.target
+Before=shutdown.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/omarchy-installer-session
+Environment=TERM=linux
+Environment=HOME=/run/omarchy-install-config
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+RuntimeDirectory=omarchy-install-config
+RuntimeDirectoryMode=0700
+WorkingDirectory=/run/omarchy-install-config
+UMask=0077
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+KillMode=control-group
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2

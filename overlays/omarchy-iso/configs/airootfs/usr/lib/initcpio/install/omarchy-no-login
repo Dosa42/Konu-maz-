@@ -2,22 +2,9 @@
 
 # Build-time only. This hook has no runtime hook and must be last in HOOKS.
 build() {
-    local applets applet
+    local applets applet image_builder
     if [[ ${_hooks[-1]:-} != omarchy-no-login ]]; then
         die 'omarchy-no-login must be the last mkinitcpio build hook'
-    fi
-    if (( ${#_optincludes[@]} )); then
-        die 'omarchy-no-login does not permit later mkinitcpio --include additions'
-    fi
-    # mkinitcpio adds FILES/BINARIES after install hooks. The profile uses neither;
-    # reject them rather than permit a later copy to restore a deleted facility.
-    if ! (
-        local -a FILES=() BINARIES=()
-        # shellcheck disable=SC1090
-        source "${_f_config:?}" || exit 1
-        (( ${#FILES[@]} == 0 && ${#BINARIES[@]} == 0 ))
-    ); then
-        die 'omarchy-no-login requires an initramfs config without FILES/BINARIES additions'
     fi
     # Removing a multicall applet symlink cannot remove its implementation.
     # Arch's initcpio BusyBox must itself be built without login/account applets.
@@ -29,8 +16,19 @@ build() {
                 ;;
         esac
     done <<< "$applets"
-    /usr/bin/python /usr/lib/omarchy-no-login/strip-initramfs.py "${BUILDROOT:?}" \
-        || die 'Initramfs login/account removal failed'
+    # mkinitcpio copies configured FILES/BINARIES, modules and --include payloads
+    # after install hooks. Finalize at its image-packing boundary so ordinary
+    # hardware additions remain supported and cannot restore a removed login.
+    [[ -n ${_optgenimg:-} ]] || die 'omarchy-no-login requires an image output (-g or a preset)'
+    image_builder=$(declare -f build_image) || die 'mkinitcpio image builder is unavailable'
+    [[ $image_builder == 'build_image ()'* ]] || die 'Unsupported mkinitcpio image builder'
+    declare -F omarchy_original_build_image >/dev/null && die 'Duplicate omarchy-no-login hook'
+    eval "${image_builder/build_image ()/omarchy_original_build_image ()}"
+    build_image() {
+        /usr/bin/python /usr/lib/omarchy-no-login/strip-initramfs.py "${BUILDROOT:?}" \
+            || die 'Initramfs login/account removal failed'
+        omarchy_original_build_image "$@"
+    }
 }
 
 help() {
@@ -38,5 +36,6 @@ help() {
 Remove initramfs account records and interactive login/recovery entry points.
 Keep the noninteractive shell interpreter required by ArchISO's boot scripts.
 Boot errors halt without opening a shell. Install this hook last in HOOKS.
+Removal runs after all payload additions, immediately before image packing.
 EOF
 }

@@ -1,0 +1,1102 @@
+diff --git a/configs/airootfs/usr/share/omarchy-iso/orchestrator/archinstall_adapter.py b/configs/airootfs/usr/share/omarchy-iso/orchestrator/archinstall_adapter.py
+index c6a279b..8aef880 100644
+--- a/configs/airootfs/usr/share/omarchy-iso/orchestrator/archinstall_adapter.py
++++ b/configs/airootfs/usr/share/omarchy-iso/orchestrator/archinstall_adapter.py
+@@ -19,11 +19,9 @@ The canonical call sequence (mirrored from archinstall.scripts.guided.py) is:
+         inst.minimal_installation(...)                # base + linux pacstrap
+         inst.set_mirrors(handler, mirror_config, on_target=True)
+         inst.setup_swap(algo=...)
+-        inst.create_users(users)
+         inst.add_additional_packages(packages)
+         inst.set_timezone(tz)
+         inst.activate_time_synchronization()
+-        inst.set_user_password(root_user)
+         inst.enable_service(services)
+         inst.genfstab()
+ 
+@@ -35,6 +33,7 @@ from the start.
+ from __future__ import annotations
+ 
+ import importlib
++import shlex
+ from contextlib import contextmanager
+ from pathlib import Path
+ from typing import Iterator
+@@ -47,6 +46,7 @@ from archinstall.lib.disk.filesystem import FilesystemHandler
+ from archinstall.lib.disk.utils import get_parent_device_path, get_unique_path_for_device, udev_sync
+ from archinstall.lib.hardware import SysInfo
+ from archinstall.lib.installer import Installer
++from archinstall.lib.command import SysCommand
+ from archinstall.lib.mirror.mirror_handler import MirrorListHandler
+ from archinstall.lib.models import Bootloader
+ from archinstall.lib.models.device import DiskLayoutType, EncryptionType
+@@ -123,6 +123,29 @@ def perform_filesystem_operations(arch_config: ArchConfig) -> None:
+             info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
+ 
+ 
++class AccountlessInstaller(Installer):
++    """Run install commands directly in the mounted target.
++
++    Archinstall 4.4's -S path starts a transient systemd service and resolves
++    the target root account by name. Plain arch-chroot uses the numeric UID 0
++    already held by this installer and needs no account or login transition.
++    """
++
++    def run_command(self, cmd: str, peek_output: bool = False) -> SysCommand:
++        return SysCommand(
++            ["arch-chroot", str(self.target), *shlex.split(cmd)],
++            peek_output=peek_output,
++        )
++
++    def _chroot_argv(self, *args: str) -> list[str]:
++        return ["arch-chroot", str(self.target), *args]
++
++    def arch_chroot(self, cmd: str, run_as: str | None = None, peek_output: bool = False) -> SysCommand:
++        if run_as is not None:
++            raise RuntimeError("This installation profile has no target login user")
++        return self.run_command(cmd, peek_output=peek_output)
++
++
+ @contextmanager
+ def open_installer(
+     arch_config: ArchConfig,
+@@ -133,7 +156,7 @@ def open_installer(
+     /mnt is left clean for a retry."""
+     if not arch_config.disk_config:
+         raise RuntimeError("disk_config missing from arch config")
+-    with Installer(
++    with AccountlessInstaller(
+         mountpoint,
+         arch_config.disk_config,
+         kernels=arch_config.kernels,
+diff --git a/configs/airootfs/usr/share/omarchy-iso/orchestrator/context.py b/configs/airootfs/usr/share/omarchy-iso/orchestrator/context.py
+index 02494b0..5212fcc 100644
+--- a/configs/airootfs/usr/share/omarchy-iso/orchestrator/context.py
++++ b/configs/airootfs/usr/share/omarchy-iso/orchestrator/context.py
+@@ -6,7 +6,6 @@ from __future__ import annotations
+ 
+ import json
+ import os
+-import secrets
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ from typing import Any
+@@ -26,6 +25,7 @@ class InstallContext:
+     user_credentials: dict
+     arch_config_path: Path
+     omarchy_install: dict[str, Any]
++    no_accounts: bool = True
+     defer_provisioning: bool = False
+ 
+     target: Path = Path("/mnt")
+@@ -57,86 +57,69 @@ class InstallContext:
+             kernel = (omarchy_install.get("storage") or {}).get("kernel") or _default_kernel()
+             user_configuration["kernels"] = [kernel]
+ 
+-        # Deferred provisioning: the whole system installs but user creation is deferred to
+-        # first boot. Selected by the configurator (omarchy_install.defer_provisioning) or by
+-        # an `defer-provisioning` marker file on an autoinstall drive, which also replaces the
+-        # user_credentials.json requirement.
+-        defer_provisioning_marker = _optional_path(os.environ.get("OMARCHY_INSTALL_DEFER_PROVISIONING_FILE"))
+-        defer_provisioning = bool(omarchy_install.get("defer_provisioning")) or defer_provisioning_marker is not None
+-        omarchy_install["defer_provisioning"] = defer_provisioning
+-
+-        if creds_path.exists():
+-            user_credentials = json.loads(creds_path.read_text())
+-        elif defer_provisioning:
+-            user_credentials = {"users": []}
+-        else:
+-            raise RuntimeError(f"credentials file missing: {creds_path}")
+-
+-        if defer_provisioning:
+-            # Deferred provisioning promises no account until first boot. A supplied
+-            # credentials file (a rig handing over its LUKS passphrase) must
+-            # not smuggle in users or a root password.
+-            encryption_password = user_credentials.get("encryption_password")
+-            user_credentials = {"users": []}
+-            if encryption_password:
+-                user_credentials["encryption_password"] = encryption_password
+-
++        # This custom ISO has one fixed installation profile. External/legacy
++        # input cannot select account creation or deferred owner provisioning.
++        omarchy_install["no_accounts"] = True
++        omarchy_install["defer_provisioning"] = False
++        supplied_credentials = json.loads(creds_path.read_text()) if creds_path.exists() else {}
++        user_credentials = {"users": []}
+         arch_configuration = dict(user_configuration)
+         arch_configuration.pop("omarchy_install", None)
+-
+-        if defer_provisioning:
+-            # The userless invariant covers the archinstall config too: a
+-            # combined/legacy config could carry account authentication that
+-            # archinstall would still act on (users, a root password). Strip
+-            # every such field so no account is created before first boot.
+-            _strip_account_fields(arch_configuration)
++        _strip_account_fields(arch_configuration)
++        _strip_account_fields(user_configuration)
++
++        # A deliberately supplied LUKS passphrase is independent of local
++        # login. Never generate a temporary password or an auto-unlock key.
++        disk_encryption = (arch_configuration.get("disk_config") or {}).get("disk_encryption")
++        if disk_encryption and disk_encryption.get("encryption_type") != "no_encryption":
++            password = supplied_credentials.get("encryption_password") or disk_encryption.get("encryption_password")
++            if not isinstance(password, str) or not password:
++                raise RuntimeError("Encrypted disk installation requires an explicit LUKS passphrase")
++            disk_encryption["encryption_password"] = password
++            user_credentials["encryption_password"] = password
+ 
+         state_dir = Path(os.environ.get("OMARCHY_INSTALL_STATE_DIR", "/run/omarchy-install"))
+         state_dir.mkdir(parents=True, exist_ok=True)
+-
+-        if defer_provisioning:
+-            # Encrypted deferred-provisioning installs have no user password to protect LUKS
+-            # with. Generate a throwaway passphrase (staged for first-boot
+-            # re-key by the stage_provisioning_state phase) and hand it to archinstall
+-            # through both places it may look: the disk_encryption block and
+-            # the credentials file.
+-            _inject_provisioning_encryption_password(arch_configuration, user_credentials)
+-            creds_path = state_dir / "provisioning-user_credentials.json"
+-            creds_path.write_text(json.dumps(user_credentials, indent=2) + "\n")
+-            creds_path.chmod(0o600)
+-
++        creds_path = state_dir / "accountless-user_credentials.json"
++        creds_path.touch(mode=0o600, exist_ok=True)
++        creds_path.chmod(0o600)
++        creds_path.write_text(json.dumps(user_credentials, indent=2) + "\n")
+         arch_config_path = state_dir / "archinstall-user_configuration.json"
++        arch_config_path.touch(mode=0o600, exist_ok=True)
++        arch_config_path.chmod(0o600)
+         arch_config_path.write_text(json.dumps(arch_configuration, indent=2) + "\n")
+ 
+         ctx = cls(
+             config_path=config_path,
+             creds_path=creds_path,
+-            full_name=_read_text(os.environ.get("OMARCHY_INSTALL_FULL_NAME_FILE")),
+-            email=_read_text(os.environ.get("OMARCHY_INSTALL_EMAIL_FILE")),
+-            encrypt=_read_text(os.environ.get("OMARCHY_INSTALL_ENCRYPT_FILE")).lower() in ("true", "yes", "1"),
+-            authorized_keys_path=_optional_path(os.environ.get("OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE")),
+-            tailscale_authkey_path=_optional_path(os.environ.get("OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE")),
++            full_name="",
++            email="",
++            encrypt=bool(
++                (disk_encryption and disk_encryption.get("encryption_type") != "no_encryption")
++                or (omarchy_install.get("storage") or {}).get("luks_uuid")
++            ),
++            authorized_keys_path=None,
++            tailscale_authkey_path=None,
+             user_configuration=user_configuration,
+             user_credentials=user_credentials,
+             arch_config_path=arch_config_path,
+             omarchy_install=omarchy_install,
+-            defer_provisioning=defer_provisioning,
++            no_accounts=True,
++            defer_provisioning=False,
+             state_dir=state_dir,
+         )
+         disk_config = user_configuration.get("disk_config", {})
+         target_mount = omarchy_install.get("target_mount") or disk_config.get("mountpoint")
+         if target_mount:
+             ctx.target = Path(target_mount)
++        if not ctx.target.is_absolute() or ctx.target.resolve() == Path("/"):
++            raise RuntimeError("Install target must be an absolute directory other than /")
++        ctx.target_log_path = ctx.target / "var/log/omarchy-install.log"
+         return ctx
+ 
+     @property
+     def username(self) -> str:
+-        users = self.user_credentials.get("users") or []
+-        if users:
+-            return users[0]["username"]
+-        if self.defer_provisioning:
+-            return ""
+-        raise RuntimeError("user_credentials.json contains no users")
++        return ""
+ 
+     @property
+     def mode(self) -> str:
+@@ -158,28 +141,7 @@ def _strip_account_fields(arch_configuration: dict) -> None:
+     for key in ("!users", "!root-password", "root_enc_password", "users"):
+         arch_configuration.pop(key, None)
+ 
+-    auth = arch_configuration.get("auth_config")
+-    if isinstance(auth, dict):
+-        for key in ("users", "root_enc_password"):
+-            auth.pop(key, None)
+-
+-
+-def _inject_provisioning_encryption_password(arch_configuration: dict, user_credentials: dict) -> None:
+-    """Ensure an encrypted deferred-provisioning install has a LUKS passphrase archinstall can
+-    use. Reuse one the input already carries (an autoinstall rig may supply
+-    its own); otherwise generate a throwaway. Mutates the disk_encryption
+-    block in place — arch_configuration shares it with user_configuration, so
+-    the stage_provisioning_state phase can read the effective passphrase back."""
+-    disk_encryption = (arch_configuration.get("disk_config") or {}).get("disk_encryption")
+-    if disk_encryption is None:
+-        return
+-
+-    password = disk_encryption.get("encryption_password") or user_credentials.get("encryption_password")
+-    if not password:
+-        password = secrets.token_urlsafe(24)
+-
+-    disk_encryption["encryption_password"] = password
+-    user_credentials["encryption_password"] = password
++    arch_configuration["auth_config"] = {}
+ 
+ 
+ def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices")) -> str:
+@@ -208,22 +170,3 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
+         },
+         "storage": {},
+     }
+-
+-
+-def _optional_path(path: str | None) -> Path | None:
+-    """A path the caller always passes but that need not exist. The live ISO
+-    passes --authorized-keys-file on every install; only autoinstall drives put
+-    a file there."""
+-    if not path:
+-        return None
+-    p = Path(path)
+-    return p if p.exists() else None
+-
+-
+-def _read_text(path: str | None) -> str:
+-    if not path:
+-        return ""
+-    p = Path(path)
+-    if not p.exists():
+-        return ""
+-    return p.read_text().strip()
+diff --git a/configs/airootfs/usr/share/omarchy-iso/orchestrator/keyboard.py b/configs/airootfs/usr/share/omarchy-iso/orchestrator/keyboard.py
+index 48c457c..c045c51 100644
+--- a/configs/airootfs/usr/share/omarchy-iso/orchestrator/keyboard.py
++++ b/configs/airootfs/usr/share/omarchy-iso/orchestrator/keyboard.py
+@@ -1,17 +1,9 @@
+-"""Offline target keyboard configuration.
+-
+-archinstall's set_keyboard_language boots the installed system in a
+-systemd-nspawn container just to run localectl. systemd-firstboot --root
+-produces the part of that output Omarchy actually consumes — KEYMAP for the
+-console plus the XKB* settings in vconsole.conf that omarchy's
+-detect-keyboard-layout.sh copies into Hyprland's kb_layout — without booting
+-anything. The Xorg 00-keyboard.conf that localectl also writes is not
+-generated: nothing on an Omarchy system reads it.
+-"""
++"""Write a validated target console keymap without login/account tooling."""
+ 
+ from __future__ import annotations
+ 
+ from pathlib import Path
++import re
+ 
+ from .command import capture
+ 
+@@ -25,6 +17,8 @@ def configure_keyboard(target: Path, language: str) -> bool:
+     """
+     if not language.strip():
+         return True
++    if not re.fullmatch(r"[A-Za-z0-9_+./-]+", language):
++        return False
+ 
+     result = capture(["localectl", "--no-pager", "list-keymaps"])
+     if result.returncode != 0:
+@@ -33,22 +27,11 @@ def configure_keyboard(target: Path, language: str) -> bool:
+     if language.lower() not in {layout.lower() for layout in result.stdout.splitlines()}:
+         return False
+ 
+-    # systemd-firstboot --force rewrites vconsole.conf wholesale, dropping the
+-    # FONT= line archinstall's set_vconsole wrote earlier.
++    # No account-management binary is needed to write a validated keymap.
+     vconsole_path = target / "etc" / "vconsole.conf"
+-    font = None
+-    if vconsole_path.exists():
+-        font = next(
+-            (line for line in vconsole_path.read_text().splitlines() if line.startswith("FONT=")),
+-            None,
+-        )
+-
+-    result = capture(["systemd-firstboot", f"--root={target}", f"--keymap={language}", "--force"])
+-    if result.returncode != 0:
+-        detail = result.stderr.strip() or "systemd-firstboot returned an error"
+-        raise RuntimeError(f"Unable to configure keyboard layout {language}: {detail}")
+-
+-    if font:
+-        vconsole_path.write_text(vconsole_path.read_text() + font + "\n")
+-
++    lines = vconsole_path.read_text().splitlines() if vconsole_path.exists() else []
++    lines = [line for line in lines if not line.startswith("KEYMAP=")]
++    lines.append(f"KEYMAP={language}")
++    vconsole_path.parent.mkdir(parents=True, exist_ok=True)
++    vconsole_path.write_text("\n".join(lines) + "\n")
+     return True
+diff --git a/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py b/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py
+index 9b6ebf5..7bab0e0 100644
+--- a/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py
++++ b/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py
+@@ -20,8 +20,8 @@ def build_phases(ctx: InstallContext):
+     """Phase order. Each entry is (display name, callable taking InstallContext).
+ 
+     The ordering is the whole point of this orchestrator: package-install
+-    hooks (limine-mkinitcpio-hook, in particular) and useradd happen at
+-    points where their prerequisites are guaranteed to be in place.
++    hooks (limine-mkinitcpio-hook, in particular) run only after their
++    prerequisites are in place. Account removal follows all package work.
+ 
+     Full-disk and protected installs use the same phase sequence. The
+     configurator only changes the JSON input: full-disk asks archinstall to
+@@ -34,13 +34,10 @@ def build_phases(ctx: InstallContext):
+         arch_install_system,
+         configure_hibernation,
+         run_system_finalizer,
+-        stage_provisioning_state,
++        prepare_accountless_initramfs,
++        sanitize_installed_target,
+         finalize_limine_boot,
+-        run_chroot_finalizer,
+         configure_dns_resolver,
+-        configure_login,
+-        configure_ssh_access,
+-        configure_tailscale,
+         validate_boot,
+         create_factory_snapshot,
+     )
+@@ -51,16 +48,11 @@ def build_phases(ctx: InstallContext):
+         ("Installing Arch + Omarchy",  arch_install_system),
+         ("Configuring hibernation",    configure_hibernation),
+         ("Configuring system",         run_system_finalizer),
+-        # Before finalize_limine_boot: the deferred-provisioning cryptkey drop-in and keyfile
+-        # must be in place for the final UKI build.
+-        ("Staging provisioning",          stage_provisioning_state),
++        ("Preparing accountless boot", prepare_accountless_initramfs),
+         ("Finalizing Limine boot",     finalize_limine_boot),
+-        ("Finalizing user",            run_chroot_finalizer),
+-        ("Configuring login",          configure_login),
+-        ("Configuring SSH access",     configure_ssh_access),
+-        ("Configuring Tailscale",      configure_tailscale),
+         ("Configuring DNS resolver",   configure_dns_resolver),
+         ("Validating boot setup",      validate_boot),
++        ("Removing target accounts and login", sanitize_installed_target),
+         ("Creating factory snapshot",  create_factory_snapshot),
+     ]
+ 
+@@ -72,8 +64,7 @@ def main() -> int:
+         error(f"Configuration error: {e}")
+         return 2
+ 
+-    who = ctx.username or "deferred provisioning (user created at first boot)"
+-    info(f"Installing Omarchy for {who} → {ctx.target}")
++    info(f"Installing Omarchy without local accounts or login → {ctx.target}")
+ 
+     from .phases_impl import (
+         boost_cpu_governor,
+diff --git a/configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py b/configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py
+index 1ebd4ce..ddaacb4 100644
+--- a/configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py
++++ b/configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py
+@@ -7,22 +7,20 @@ Phase ordering (full-disk and protected/pre-mounted):
+                              wrapper before Python imports it)
+     prepare_install_target → verify pre-mounted target/ESP when the JSON uses
+                              pre_mounted_config; no-op for full-disk installs
+-    arch_install_system    → one archinstall flow for partition/mount-or-use,
+-                             base install, early Omarchy packages, Limine setup,
+-                             useradd, runtime Omarchy packages, fstab
+-    configure_hibernation  → root-owned swap/resume drop-ins
+-    run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
+-    finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
+-    run_chroot_finalizer   → arch-chroot -u user omarchy-provision-user
+-    configure_login        → sddm state + encrypted-install autologin
+-    configure_ssh_access   → authorized_keys for autoinstall; no-op otherwise
+-    configure_tailscale    → tailnet join staged for first boot; no-op otherwise
++    arch_install_system    → real partition/mount, packages, Limine, fstab
++    configure_hibernation  → swap/resume drop-ins
++    run_system_finalizer   → system and hardware setup, including Snapper
++    prepare_accountless_initramfs → install the final initramfs removal hook
++    finalize_limine_boot   → final Limine config/UKI after hardware drop-ins
+     validate_boot          → assert UKI / limine.conf / kernel cmdline are sane
++    sanitize_installed_target → remove package-created accounts/login
++    create_factory_snapshot → snapshot the completed accountless system
+ """
+ 
+ from __future__ import annotations
+ 
+ import hashlib
++import json
+ import os
+ import re
+ import shutil
+@@ -46,7 +44,7 @@ def _iso_ref() -> str:
+     if ref := os.environ.get("OMARCHY_ISO_REF"):
+         return ref.strip()
+ 
+-    ref_file = Path("/root/omarchy_iso_ref")
++    ref_file = Path("/usr/share/omarchy-iso/iso-ref")
+     if ref_file.exists():
+         try:
+             return ref_file.read_text().strip()
+@@ -117,11 +115,8 @@ def _omarchy_nvim_package() -> str:
+     return _package_targets()["nvim"]
+ 
+ 
+-# Packages installed BEFORE useradd. The selected omarchy-settings package and
+-# omarchy-nvim populate /etc/skel so the user's home gets seeded correctly, and
+-# omarchy-settings also ships the limine/snapper configs. Target-side setup
+-# commands are installed later by the selected Omarchy runtime package and
+-# executed in chroot.
++# Install the settings and Limine/Snapper templates before runtime setup.
++# Their account defaults are removed by the final target sanitization phase.
+ EARLY_BOOTSTRAP_BASE_PACKAGES = [
+     "base-devel",
+     "git",
+@@ -204,7 +199,7 @@ def _install_disk(ctx: InstallContext) -> str | None:
+ # ─────────────────────────────────────────────────────────────────────────────
+ # arch_install_system: everything inside a single Installer context manager.
+ # Reorders guided.py's perform_installation() so early Omarchy packages install
+-# before user creation and before our Omarchy-owned Limine setup copies files
++# before our Omarchy-owned Limine setup copies files
+ # from the target's limine package.
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
+@@ -287,10 +282,6 @@ def arch_install_system(ctx: InstallContext) -> None:
+             _install_early_packages(installer)
+             _configure_limine_boot(ctx, installer, config)
+ 
+-            info("› creating user (with /etc/skel populated)")
+-            if config.auth_config and config.auth_config.users:
+-                installer.create_users(config.auth_config.users)
+-
+             if config.app_config:
+                 info("› installing archinstall application selections")
+                 arch.install_applications(installer, config)
+@@ -298,13 +289,6 @@ def arch_install_system(ctx: InstallContext) -> None:
+             info("› installing Omarchy runtime + omarchy-base.packages")
+             installer.add_additional_packages(_runtime_package_list(ctx))
+ 
+-            # Tailscale is bundled in the offline mirror but only installed
+-            # when an autoinstall drive staged an auth key; must happen here,
+-            # while the mirror is still bind-mounted, not in the phase that
+-            # configures the join.
+-            if ctx.tailscale_authkey_path is not None:
+-                info("› installing tailscale (auth key staged for first boot)")
+-                installer.add_additional_packages(["tailscale"])
+         finally:
+             _unmask_mkinitcpio_pacman_hooks(ctx)
+             _unmount_offline_package_cache(ctx)
+@@ -314,8 +298,6 @@ def arch_install_system(ctx: InstallContext) -> None:
+             installer.set_timezone(config.timezone)
+         if config.ntp:
+             installer.activate_time_synchronization()
+-        if root := arch.root_user(config):
+-            installer.set_user_password(root)
+ 
+         if pre_mounted:
+             _write_pre_mounted_fstab(ctx)
+@@ -577,7 +559,6 @@ def _installer_esp_mount(installer) -> str:
+     return "/boot"
+ 
+ 
+-
+ def _limine_template(ctx: InstallContext, filename: str) -> Path:
+     candidates = [
+         ctx.target / "usr" / "share" / "omarchy" / "install" / "assets" / "limine" / filename,
+@@ -935,7 +916,7 @@ def _split_partition_device(part_dev: str) -> tuple[str, int]:
+ 
+ 
+ def configure_hibernation(ctx: InstallContext) -> None:
+-    """Configure swap/resume in the target as root before user setup.
++    """Configure swap/resume before the final boot image build.
+ 
+     Hibernation is system boot configuration, not per-user setup. The final
+     Limine UKI build still happens later in finalize_limine_boot after this
+@@ -1004,8 +985,7 @@ def _debug_run(ctx: InstallContext, cmd: list[str]) -> None:
+ #  1. point the target at the offline pacman.conf
+ #  2. bind-mount the offline mirror + /opt/packages into /mnt for target pacman
+ #     and bundled language runtimes
+-#  3. arch-chroot as root → omarchy-apply-system --first-install
+-#  4. arch-chroot as user → omarchy-provision-user --first-install
++#  3. arch-chroot using numeric UID 0 → system and hardware setup
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
+ def _prepare_target_setup(ctx: InstallContext) -> None:
+@@ -1038,7 +1018,7 @@ def _ensure_finalizer_log_started(ctx: InstallContext) -> tuple[str, int]:
+ 
+     ctx.log_path.parent.mkdir(parents=True, exist_ok=True)
+     ctx.log_path.touch(exist_ok=True)
+-    ctx.log_path.chmod(0o666)
++    ctx.log_path.chmod(0o644)
+ 
+     if not ctx.state.get("omarchy_finalizer_header_written"):
+         with ctx.log_path.open("a", encoding="utf-8") as log:
+@@ -1048,37 +1028,14 @@ def _ensure_finalizer_log_started(ctx: InstallContext) -> tuple[str, int]:
+     return ctx.state["omarchy_start_time"], ctx.state["omarchy_start_epoch"]
+ 
+ 
+-def _target_user_env(ctx: InstallContext, user: str) -> list[str]:
+-    home = f"/home/{user}"
+-    shell = "/bin/bash"
+-    passwd = ctx.target / "etc" / "passwd"
+-
+-    try:
+-        for line in passwd.read_text(errors="ignore").splitlines():
+-            fields = line.split(":")
+-            if len(fields) >= 7 and fields[0] == user:
+-                home = fields[5] or home
+-                shell = fields[6] or shell
+-                break
+-    except OSError:
+-        pass
+-
+-    return [
+-        f"HOME={home}",
+-        f"USER={user}",
+-        f"LOGNAME={user}",
+-        f"SHELL={shell}",
+-    ]
+-
+-
+-def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str | None = None) -> None:
++def _run_target_setup_command(ctx: InstallContext, cmd: list[str]) -> None:
+     _prepare_target_setup(ctx)
+     omarchy_start_time, omarchy_start_epoch = _ensure_finalizer_log_started(ctx)
+ 
+     target_log = ctx.target / "var" / "log" / "omarchy-install.log"
+     target_log.parent.mkdir(parents=True, exist_ok=True)
+     target_log.touch(exist_ok=True)
+-    target_log.chmod(0o666)
++    target_log.chmod(0o644)
+ 
+     log_bind_mounted = False
+     try:
+@@ -1110,9 +1067,6 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str
+         _debug_log(ctx, "running target setup command: " + " ".join(cmd))
+ 
+     chroot_cmd = ["arch-chroot"]
+-    if user:
+-        chroot_cmd += ["-u", user]
+-        env_extras.extend(_target_user_env(ctx, user))
+     chroot_cmd += [str(ctx.target), "env", "--unset=XDG_RUNTIME_DIR", *env_extras, *cmd]
+ 
+     try:
+@@ -1135,140 +1089,88 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str
+ 
+ 
+ def run_system_finalizer(ctx: InstallContext) -> None:
+-    if ctx.defer_provisioning:
+-        cmd = ["/usr/bin/omarchy-apply-system", "--defer-provisioning", "--first-install"]
+-    else:
+-        cmd = ["/usr/bin/omarchy-apply-system", "--install-user", ctx.username, "--first-install"]
+-
++    # The upstream wrapper requires either a named owner or first-boot owner
++    # provisioning and always configures SDDM. Run the actual system/hardware
++    # tasks explicitly for this profile, without those account setup phases.
++    script = """
++set -euo pipefail
++export OMARCHY_FIRST_INSTALL=1 OMARCHY_UPGRADE=0 OMARCHY_INSTALL_USER=
++export PATH="$OMARCHY_PATH/bin:$PATH"
++source "$OMARCHY_INSTALL/helpers/logging.sh"
++start_install_log
++for script in theme-system browser-policy fix-powerprofilesctl-shebang docker snapper firewall; do
++    run_logged "$OMARCHY_INSTALL/config/$script.sh"
++done
++source "$OMARCHY_INSTALL/hardware/all.sh"
++source "$OMARCHY_INSTALL/post-install/all.sh"
++stop_install_log
++"""
+     _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+     try:
+-        _run_target_setup_command(ctx, cmd)
++        _run_target_setup_command(ctx, ["/bin/bash", "-c", script])
+     finally:
+         _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+ 
+ 
+-# ─────────────────────────────────────────────────────────────────────────────
+-# stage_provisioning_state: produce the on-disk "provisioning state" the runtime's first-boot
+-# setup (omarchy-provision-owner) and factory reset (omarchy-system-factory-reset) consume.
+-#
+-# Every install stashes the bundled Node tarball in /var/lib/omarchy/provisioning/
+-# so a later factory reset can finalize the new owner's user offline. deferred-provisioning
+-# installs additionally arm the first-boot setup service and, on encrypted
+-# targets, stage the throwaway LUKS passphrase: the keyfile embedded in the
+-# initramfs auto-unlocks boot during the provisioning window, and first-boot setup
+-# re-keys the volume to the owner's password and removes it.
+-#
+-# Runs before finalize_limine_boot so the cryptkey cmdline drop-in and the
+-# keyfile land in the final UKI build.
+-# ─────────────────────────────────────────────────────────────────────────────
+-
+-PROVISION_STATE_DIR = "var/lib/omarchy/provisioning"
+-PROVISION_KEYFILE = "etc/omarchy/provisioning.key"
+-NODE_PACKAGES_DIR = Path("/opt/packages")
+-
+-
+-def stage_provisioning_state(ctx: InstallContext) -> None:
+-    # World-readable: first-boot finalization reads the Node tarball as the
+-    # new user. The only secret inside (luks-key) is itself 0600 root.
+-    provisioning_dir = ctx.target / PROVISION_STATE_DIR
+-    provisioning_dir.mkdir(parents=True, exist_ok=True)
+-    provisioning_dir.chmod(0o755)
+-
+-    _stage_node_tarball(ctx, provisioning_dir)
++def prepare_accountless_initramfs(ctx: InstallContext) -> None:
++    """Install the same final-image login removal used to build the live ISO.
+ 
+-    if not ctx.defer_provisioning:
+-        return
+-
+-    service_src = ctx.target / "usr/share/omarchy/install/provisioning/omarchy-provision-owner.service"
+-    setup_bin = ctx.target / "usr/bin/omarchy-provision-owner"
+-    if not service_src.exists() or not setup_bin.exists():
+-        raise RuntimeError(
+-            "deferred-provisioning install requested, but the installed Omarchy runtime does not ship "
+-            "first-boot setup (omarchy-provision-owner + install/provisioning/omarchy-provision-owner.service). "
+-            "Update the runtime package this ISO bundles before installing in deferred provisioning."
+-        )
+-
+-    info("› arming first-boot setup")
+-    (provisioning_dir / "pending").touch()
+-
+-    unit_dst = ctx.target / "etc/systemd/system/omarchy-provision-owner.service"
+-    unit_dst.parent.mkdir(parents=True, exist_ok=True)
+-    shutil.copy2(service_src, unit_dst)
+-    wants_dir = ctx.target / "etc/systemd/system/multi-user.target.wants"
+-    wants_dir.mkdir(parents=True, exist_ok=True)
+-    link = wants_dir / "omarchy-provision-owner.service"
+-    link.unlink(missing_ok=True)
+-    link.symlink_to("/etc/systemd/system/omarchy-provision-owner.service")
+-
+-    if _provision_install_encrypted(ctx):
+-        _stage_provisioning_luks_unlock(ctx, provisioning_dir)
+-
+-
+-def _stage_node_tarball(ctx: InstallContext, provisioning_dir) -> None:
+-    tarballs = sorted(NODE_PACKAGES_DIR.glob("node-v*-linux-x64.tar.gz"))
+-    if not tarballs:
+-        # Hard error on every install, not just deferred-provisioning installs: the stash is what lets a
+-        # later factory reset finalize the next owner offline, and an ISO
+-        # build always bundles the tarball — its absence means a broken build.
+-        raise RuntimeError(
+-            f"no bundled Node tarball in {NODE_PACKAGES_DIR} — first-boot setup "
+-            "and factory reset could not finalize a user offline"
+-        )
+-
+-    packages_dir = provisioning_dir / "packages"
+-    packages_dir.mkdir(parents=True, exist_ok=True)
+-    target_tarball = packages_dir / tarballs[0].name
+-    if not target_tarball.exists():
+-        info("› stashing Node tarball for offline first-boot setup")
+-        shutil.copy2(tarballs[0], target_tarball)
+-
+-
+-def _provision_install_encrypted(ctx: InstallContext) -> bool:
+-    if _storage_intent(ctx).get("luks_uuid"):
+-        return True
+-    disk_encryption = (ctx.user_configuration.get("disk_config") or {}).get("disk_encryption")
+-    if disk_encryption and disk_encryption.get("encryption_type", "luks") != "no_encryption":
+-        return True
+-    return ctx.encrypt
+-
+-
+-def _provision_encryption_password(ctx: InstallContext) -> str | None:
+-    disk_encryption = (ctx.user_configuration.get("disk_config") or {}).get("disk_encryption") or {}
+-    return disk_encryption.get("encryption_password") or ctx.user_credentials.get("encryption_password")
+-
+-
+-def _stage_provisioning_luks_unlock(ctx: InstallContext, provisioning_dir) -> None:
+-    password = _provision_encryption_password(ctx)
+-    if not password:
+-        # Full-disk deferred-provisioning installs get a generated passphrase injected by
+-        # InstallContext; only a pre-mounted (rig-partitioned) LUKS target can
+-        # land here, and it must hand over the passphrase it formatted with.
+-        raise RuntimeError(
+-            "deferred-provisioning install on a pre-encrypted target requires the LUKS passphrase "
+-            "in user_credentials.json (encryption_password) so first boot can re-key"
+-        )
+-
+-    info("› staging LUKS auto-unlock for the provisioning window")
+-
+-    # Byte-for-byte the slot passphrase: no trailing newline anywhere.
+-    luks_key = provisioning_dir / "luks-key"
+-    luks_key.write_text(password)
+-    luks_key.chmod(0o600)
+-
+-    keyfile = ctx.target / PROVISION_KEYFILE
+-    keyfile.parent.mkdir(parents=True, exist_ok=True)
+-    keyfile.write_text(password)
+-    keyfile.chmod(0o600)
+-
+-    cmdline_dropin = ctx.target / "etc/limine-entry-tool.d/99-omarchy-provisioning-unlock.conf"
+-    cmdline_dropin.parent.mkdir(parents=True, exist_ok=True)
+-    cmdline_dropin.write_text(
+-        'KERNEL_CMDLINE[default]+=" cryptkey=rootfs:/etc/omarchy/provisioning.key"\n'
+-    )
+-
+-    files_dropin = ctx.target / "etc/mkinitcpio.conf.d/99-omarchy-provisioning-key.conf"
+-    files_dropin.parent.mkdir(parents=True, exist_ok=True)
+-    files_dropin.write_text("FILES+=(/etc/omarchy/provisioning.key)\n")
++    Keep hardware MODULES/FILES/BINARIES drop-ins. The final hook processes the
++    assembled image after those additions, before each UKI is packed.
++    """
++    for rel in (
++        "usr/lib/initcpio/install/omarchy-no-login",
++        "usr/lib/omarchy-no-login/strip-initramfs.py",
++    ):
++        src, dst = Path("/") / rel, ctx.target / rel
++        if not src.is_file():
++            raise RuntimeError(f"Required accountless initramfs helper missing: {src}")
++        dst.parent.mkdir(parents=True, exist_ok=True)
++        shutil.copy2(src, dst)
++
++    # Use the BusyBox init path supported by the stripping hook. Keep the
++    # selected disk-encryption path, and keep hibernation when configured.
++    hooks = ["base", "udev", "autodetect", "microcode", "modconf", "kms",
++             "keyboard", "keymap", "consolefont", "block"]
++    if ctx.encrypt:
++        hooks.append("encrypt")
++    hooks.append("filesystems")
++    if (ctx.target / "etc/mkinitcpio.conf.d/omarchy_resume.conf").exists():
++        hooks.append("resume")
++    hooks.extend(["fsck", "omarchy-no-login"])
++    dropin = ctx.target / "etc/mkinitcpio.conf.d/zzzz-omarchy-no-login.conf"
++    dropin.parent.mkdir(parents=True, exist_ok=True)
++    hook_config = "# Final accountless initramfs hook order.\nHOOKS=(" + " ".join(hooks) + ")\n"
++    dropin.write_text(hook_config)
++    # Presets that explicitly name /etc/mkinitcpio.conf disable conf.d loading.
++    # Put the fixed hook order in that config as well, retaining all hardware
++    # modules and auxiliary files already configured there.
++    main_config = ctx.target / "etc/mkinitcpio.conf"
++    original = main_config.read_text() if main_config.exists() else ""
++    main_config.write_text(original.rstrip() + "\n" + hook_config)
++
++
++def sanitize_installed_target(ctx: InstallContext) -> None:
++    """Remove package-created account/login facilities before any snapshot."""
++    target = ctx.target.resolve()
++    if not ctx.target.is_absolute() or target == Path("/") or not _is_mountpoint(target):
++        raise RuntimeError(f"Refusing to finalize an invalid install target: {ctx.target}")
++    # A target walk must never traverse the live ISO's bound package sources.
++    # Unmount errors are fatal here, unlike best-effort exit cleanup.
++    for mountpoint in reversed(ctx.state.get("bind_mounts", [])):
++        subprocess.run(["umount", mountpoint], check=True)
++    ctx.state["bind_mounts"] = []
++    marker = target / "usr/share/omarchy-iso/custom-build-status.json"
++    marker.parent.mkdir(parents=True, exist_ok=True)
++    marker.write_text(json.dumps({"profile": "custom-no-login", "no_accounts": True}) + "\n")
++    evidence = ctx.state_dir / "installed-no-login-evidence.json"
++    subprocess.run([
++        "/usr/bin/python", "/usr/lib/omarchy-installer/remove-login.py",
++        "finalize-installed", str(target), str(evidence),
++    ], check=True)
++    destination = target / "usr/share/omarchy-iso/installed-no-login-evidence.json"
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copy2(evidence, destination)
+ 
+ 
+ def finalize_limine_boot(ctx: InstallContext) -> None:
+@@ -1363,18 +1265,6 @@ def _limine_kernel_cmdline(config_text: str) -> str:
+     return " ".join(part for part in parts if part).strip()
+ 
+ 
+-def run_chroot_finalizer(ctx: InstallContext) -> None:
+-    if ctx.defer_provisioning:
+-        info("› deferred-provisioning install: user finalization deferred to first boot")
+-        return
+-
+-    _run_target_setup_command(
+-        ctx,
+-        ["/usr/bin/omarchy-provision-user", "--force", "--first-install"],
+-        user=ctx.username,
+-    )
+-
+-
+ def configure_dns_resolver(ctx: InstallContext) -> None:
+     """Put the installed system in systemd-resolved stub mode.
+ 
+@@ -1395,252 +1285,10 @@ def configure_dns_resolver(ctx: InstallContext) -> None:
+ 
+ 
+ def _read_omarchy_mirror() -> str:
+-    p = Path("/root/omarchy_mirror")
++    p = Path("/usr/share/omarchy-iso/mirror")
+     return p.read_text().strip() if p.exists() else "stable"
+ 
+ 
+-# ─────────────────────────────────────────────────────────────────────────────
+-# configure_login: seed SDDM's last user/session for the password-only Omarchy
+-# greeter. Encrypted installs autologin because the LUKS prompt is the auth
+-# boundary; unencrypted installs leave SDDM as the auth screen.
+-# ─────────────────────────────────────────────────────────────────────────────
+-
+-def configure_login(ctx: InstallContext) -> None:
+-    sddm_dir = ctx.target / "etc" / "sddm.conf.d"
+-    sddm_dir.mkdir(parents=True, exist_ok=True)
+-    (sddm_dir / "99-omarchy-login.conf").write_text(
+-        "[Theme]\nCurrent=omarchy\n\n"
+-        "[Users]\nRememberLastUser=true\nRememberLastSession=true\n"
+-    )
+-
+-    autologin_conf = sddm_dir / "autologin.conf"
+-    if ctx.encrypt and not ctx.defer_provisioning:
+-        autologin_conf.write_text(
+-            "[Autologin]\n"
+-            f"User={ctx.username}\n"
+-            "Session=omarchy.desktop\n"
+-        )
+-    else:
+-        # deferred-provisioning installs have no user yet; omarchy-provision-owner writes autologin
+-        # and SDDM state at first boot once the owner exists.
+-        autologin_conf.unlink(missing_ok=True)
+-
+-    if not ctx.defer_provisioning:
+-        state_dir = ctx.target / "var" / "lib" / "sddm"
+-        state_dir.mkdir(parents=True, exist_ok=True)
+-        (state_dir / "state.conf").write_text(
+-            f"[Last]\nSession=omarchy.desktop\nUser={ctx.username}\n"
+-        )
+-        subprocess.run(
+-            ["arch-chroot", str(ctx.target), "chown", "sddm:sddm",
+-             "/var/lib/sddm", "/var/lib/sddm/state.conf"],
+-            check=False, capture_output=True,
+-        )
+-
+-    autologin = ctx.target / "etc" / "systemd" / "system" / "getty@tty1.service.d" / "autologin.conf"
+-    autologin.unlink(missing_ok=True)
+-
+-    subprocess.run(
+-        ["arch-chroot", str(ctx.target), "systemctl", "enable", "sddm.service"],
+-        check=False, capture_output=True,
+-    )
+-
+-
+-# ─────────────────────────────────────────────────────────────────────────────
+-# configure_ssh_access: make the installed machine reachable over SSH with the
+-# keys an autoinstall drive supplied. A stock Omarchy install ships openssh but
+-# leaves sshd disabled, and its firewall.sh opens only LocalSend and docker DNS,
+-# so all three pieces -- keys, service, firewall -- have to be done here.
+-# ─────────────────────────────────────────────────────────────────────────────
+-
+-def configure_ssh_access(ctx: InstallContext) -> None:
+-    if ctx.authorized_keys_path is None:
+-        return
+-
+-    keys = _authorized_keys(ctx.authorized_keys_path)
+-
+-    if ctx.defer_provisioning:
+-        # No user to authorize yet. Stage the keys in provisioning state for
+-        # omarchy-provision-owner to install once first boot creates the owner, and
+-        # still open the door (sshd + ufw) below.
+-        info(f"› staging {len(keys)} SSH key(s) for the first-boot user")
+-        provisioning_dir = ctx.target / PROVISION_STATE_DIR
+-        provisioning_dir.mkdir(parents=True, exist_ok=True)
+-        staged = provisioning_dir / "authorized_keys"
+-        staged.write_text("".join(f"{key}\n" for key in keys))
+-        staged.chmod(0o600)
+-    else:
+-        info(f"› installing {len(keys)} SSH key(s) for {ctx.username}")
+-
+-        ssh_dir = ctx.target / "home" / ctx.username / ".ssh"
+-        ssh_dir.mkdir(parents=True, exist_ok=True)
+-        ssh_dir.chmod(0o700)
+-
+-        authorized_keys = ssh_dir / "authorized_keys"
+-        authorized_keys.write_text("".join(f"{key}\n" for key in keys))
+-        authorized_keys.chmod(0o600)
+-
+-        # Ask the target for the uid rather than assuming the first user is 1000.
+-        # Uncaptured so a failure shows up in the install log, and checked because
+-        # a root-owned authorized_keys is one sshd refuses to read.
+-        subprocess.run(
+-            ["arch-chroot", str(ctx.target), "chown", "-R",
+-             f"{ctx.username}:{ctx.username}", f"/home/{ctx.username}/.ssh"],
+-            check=True,
+-        )
+-
+-    info("› enabling sshd")
+-    subprocess.run(
+-        ["arch-chroot", str(ctx.target), "systemctl", "enable", "sshd.service"],
+-        check=True,
+-    )
+-
+-    # Open port 22 in the target's ufw, which runs default-deny incoming, so an
+-    # enabled sshd is still unreachable -- connections time out rather than
+-    # being refused.
+-    #
+-    # ufw cannot reach netfilter from inside the chroot and exits non-zero
+-    # saying so, but it writes the rule to user.rules first, and that file is
+-    # what ufw.service loads on first boot. So the exit status is the wrong
+-    # thing to check here; the rule landing in the file is the thing that
+-    # matters.
+-    info("› allowing SSH through ufw")
+-    subprocess.run(["arch-chroot", str(ctx.target), "ufw", "allow", "ssh"], check=False)
+-
+-    rules = ctx.target / "etc" / "ufw" / "user.rules"
+-    text = rules.read_text() if rules.exists() else ""
+-    if "--dport 22 -j ACCEPT" not in text:
+-        raise RuntimeError(f"ufw did not record an allow rule for port 22 in {rules}")
+-
+-
+-def _authorized_keys(path: Path) -> list[str]:
+-    """Read the autoinstall authorized_keys: sshd's own format, one public key
+-    per line, with blank lines and # comments dropped.
+-
+-    Raise rather than skip on anything unusable. An install that "succeeds"
+-    into a machine nobody can log into is worse than one that stops with the
+-    reason on screen.
+-    """
+-    try:
+-        lines = path.read_text().splitlines()
+-    except OSError as exc:
+-        raise RuntimeError(f"{path} is not readable: {exc}") from exc
+-
+-    keys = [line.strip() for line in lines]
+-    keys = [key for key in keys if key and not key.startswith("#")]
+-    if not keys:
+-        raise RuntimeError(f"{path} contains no SSH keys")
+-
+-    return keys
+-
+-
+-# ─────────────────────────────────────────────────────────────────────────────
+-# configure_tailscale: stage the tailnet join an autoinstall drive asked for.
+-# `tailscale up` needs a running tailscaled and there is no systemd in the
+-# chroot, so the install only stages: the key, the enabled services, and a
+-# oneshot first-boot unit that performs the join once the network is really
+-# there. The package itself was installed from the offline mirror during
+-# arch_install_system -- nothing is fetched at boot.
+-# ─────────────────────────────────────────────────────────────────────────────
+-
+-TAILSCALE_AUTHKEY_TARGET = "/etc/tailscale/authkey"
+-
+-# systemd expands $VAR in ExecStart, so the retry loop avoids `$` entirely.
+-# network-online.target can be reached before there is real connectivity, so
+-# retry inside the boot -- but NOT as a oneshot: target units implicitly gain
+-# After= for their Wants=, so a oneshot in multi-user.target holds the whole
+-# boot (SDDM included) hostage until it finishes. Type=simple counts as
+-# started the moment it forks, letting boot proceed while the join retries in
+-# the background for as long as the boot lasts. Cleanup lives inside the
+-# script because it must only run after a successful join: the key is removed
+-# and the unit disabled on success, while on a boot with no connectivity both
+-# survive -- so a machine installed offline joins on the first boot that can.
+-TAILSCALE_JOIN_UNIT = f"""\
+-[Unit]
+-Description=Join the tailnet with the auth key staged by autoinstall
+-Wants=network-online.target
+-After=network-online.target tailscaled.service
+-Requires=tailscaled.service
+-ConditionPathExists={TAILSCALE_AUTHKEY_TARGET}
+-
+-[Service]
+-Type=simple
+-ExecStart=/usr/bin/sh -c 'until tailscale up --auth-key file:{TAILSCALE_AUTHKEY_TARGET}; do sleep 15; done; rm -f {TAILSCALE_AUTHKEY_TARGET}; systemctl disable omarchy-tailscale-join.service'
+-
+-[Install]
+-WantedBy=multi-user.target
+-"""
+-
+-
+-def configure_tailscale(ctx: InstallContext) -> None:
+-    if ctx.tailscale_authkey_path is None:
+-        return
+-
+-    key = _tailscale_authkey(ctx.tailscale_authkey_path)
+-
+-    # An ISO built before tailscale was bundled installs nothing, and a staged
+-    # key with no binary would fail silently forever on first boot.
+-    if not (ctx.target / "usr" / "bin" / "tailscale").exists():
+-        raise RuntimeError("tailscale is not installed on the target; this ISO does not bundle it")
+-
+-    info("› staging Tailscale auth key")
+-    ts_dir = ctx.target / "etc" / "tailscale"
+-    ts_dir.mkdir(parents=True, exist_ok=True)
+-    ts_dir.chmod(0o700)
+-    authkey = ts_dir / "authkey"
+-    authkey.write_text(f"{key}\n")
+-    authkey.chmod(0o600)
+-
+-    info("› enabling tailscaled and the first-boot join")
+-    unit = ctx.target / "etc" / "systemd" / "system" / "omarchy-tailscale-join.service"
+-    unit.parent.mkdir(parents=True, exist_ok=True)
+-    unit.write_text(TAILSCALE_JOIN_UNIT)
+-    subprocess.run(
+-        ["arch-chroot", str(ctx.target), "systemctl", "enable",
+-         "tailscaled.service", "omarchy-tailscale-join.service"],
+-        check=True,
+-    )
+-
+-    # Same dance as configure_ssh_access: ufw cannot reach netfilter from the
+-    # chroot and exits non-zero, but it records the rule in user.rules first,
+-    # and that file is what ufw.service loads on first boot. Without the rule
+-    # the node joins the tailnet and is then unreachable over it.
+-    info("› allowing tailnet traffic through ufw")
+-    subprocess.run(
+-        ["arch-chroot", str(ctx.target), "ufw", "allow", "in", "on", "tailscale0"],
+-        check=False,
+-    )
+-
+-    rules = ctx.target / "etc" / "ufw" / "user.rules"
+-    text = rules.read_text() if rules.exists() else ""
+-    if "-i tailscale0 -j ACCEPT" not in text:
+-        raise RuntimeError(f"ufw did not record an allow rule for tailscale0 in {rules}")
+-
+-
+-def _tailscale_authkey(path: Path) -> str:
+-    """Read the autoinstall tailscale_authkey: exactly one key, with blank
+-    lines and # comments dropped. No format validation beyond that -- key
+-    formats are Tailscale's to change.
+-
+-    Raise rather than skip on anything unusable, same reasoning as
+-    _authorized_keys: a machine that "succeeds" into never joining the
+-    tailnet is worse than one that stops with the reason on screen.
+-    """
+-    try:
+-        lines = path.read_text().splitlines()
+-    except OSError as exc:
+-        raise RuntimeError(f"{path} is not readable: {exc}") from exc
+-
+-    keys = [line.strip() for line in lines]
+-    keys = [key for key in keys if key and not key.startswith("#")]
+-    if not keys:
+-        raise RuntimeError(f"{path} contains no auth key")
+-    if len(keys) > 1:
+-        raise RuntimeError(f"{path} contains {len(keys)} keys; expected exactly one")
+-
+-    return keys[0]
+-
+-
+ # ─────────────────────────────────────────────────────────────────────────────
+ # validate_boot: hard checks before reboot. If the install ran but produced a
+ # boot config or UKI that can't actually boot, halt here rather than surprise
+@@ -1695,34 +1343,6 @@ def validate_boot(ctx: InstallContext) -> None:
+     if ctx.is_protected:
+         _validate_pre_mounted_filesystems(ctx)
+ 
+-    if ctx.defer_provisioning:
+-        _validate_provisioning_state(ctx)
+-
+-
+-def _validate_provisioning_state(ctx: InstallContext) -> None:
+-    """An deferred-provisioning install that boots without a working first-boot setup is a
+-    user-less brick; insist the armed state is complete before reboot."""
+-    provisioning_dir = ctx.target / PROVISION_STATE_DIR
+-    if not (provisioning_dir / "pending").exists():
+-        raise RuntimeError(f"deferred-provisioning install but {provisioning_dir / 'pending'} is missing")
+-
+-    link = ctx.target / "etc/systemd/system/multi-user.target.wants/omarchy-provision-owner.service"
+-    if not link.is_symlink():
+-        raise RuntimeError("deferred-provisioning install but omarchy-provision-owner.service is not enabled")
+-
+-    if not list((provisioning_dir / "packages").glob("node-v*.tar.gz")):
+-        raise RuntimeError(f"deferred-provisioning install but no Node tarball staged in {provisioning_dir / 'packages'}")
+-
+-    if _provision_install_encrypted(ctx):
+-        for required in (provisioning_dir / "luks-key", ctx.target / PROVISION_KEYFILE):
+-            if not required.exists():
+-                raise RuntimeError(f"encrypted deferred-provisioning install but {required} is missing")
+-        limine_conf_text = (
+-            ctx.target / _boot_intent(ctx)["esp_mount"].lstrip("/") / "limine.conf"
+-        ).read_text()
+-        if "cryptkey=rootfs:" not in limine_conf_text:
+-            raise RuntimeError("encrypted deferred-provisioning install but limine.conf has no cryptkey= for auto-unlock")
+-
+ 
+ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
+     """Never hand over a system whose UKI rebuild hook is still masked.

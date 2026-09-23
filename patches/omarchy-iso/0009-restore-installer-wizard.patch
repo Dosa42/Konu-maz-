@@ -1,0 +1,386 @@
+diff --git a/builder/build-iso.sh b/builder/build-iso.sh
+index 7e5c064..a5c36cc 100755
+--- a/builder/build-iso.sh
++++ b/builder/build-iso.sh
+@@ -86,6 +86,11 @@ rm -f -- "$build_cache_dir/grub/loopback.cfg" \
+ mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
+ echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
+ echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
++# The direct installer cannot depend on a root home or an account login.
++cp "$build_cache_dir/airootfs/root/configurator" "$build_cache_dir/airootfs/usr/share/omarchy-iso/configurator"
++cp "$build_cache_dir/airootfs/root/omarchy_mirror" "$build_cache_dir/airootfs/usr/share/omarchy-iso/mirror"
++cp "$build_cache_dir/airootfs/root/omarchy_iso_ref" "$build_cache_dir/airootfs/usr/share/omarchy-iso/iso-ref"
++install -Dm755 /builder/remove-login.py "$build_cache_dir/airootfs/usr/lib/omarchy-installer/remove-login.py"
+ cat > "$build_cache_dir/airootfs/usr/share/omarchy-iso/package-targets" <<EOF
+ OMARCHY_RUNTIME_PACKAGE=$OMARCHY_RUNTIME_PACKAGE
+ OMARCHY_SETTINGS_PACKAGE=$OMARCHY_SETTINGS_PACKAGE
+diff --git a/configs/profiledef.sh b/configs/profiledef.sh
+index 76560f5..9baec32 100644
+--- a/configs/profiledef.sh
++++ b/configs/profiledef.sh
+@@ -30,6 +30,9 @@ airootfs_image_tool_options=(
+ )
+ bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
+ file_permissions=(
++  ["/usr/local/bin/omarchy-installer-session"]="0:0:755"
++  ["/usr/share/omarchy-iso/configurator"]="0:0:755"
++  ["/usr/lib/omarchy-installer/remove-login.py"]="0:0:755"
+   ["/etc/shadow"]="0:0:400"
+   ["/root"]="0:0:750"
+   ["/root/.automated_script.sh"]="0:0:755"
+diff --git a/configs/airootfs/root/configurator b/configs/airootfs/root/configurator
+index 2960c06..b6d3956 100644
+--- a/configs/airootfs/root/configurator
++++ b/configs/airootfs/root/configurator
+@@ -1,6 +1,6 @@
+ #!/bin/bash
+ 
+-# On the live ISO, .automated_script.sh exports OMARCHY_PATH and the package
++# On the live ISO, omarchy-installer-session exports OMARCHY_PATH and the package
+ # targets before running us. The defaults keep bin/omarchy-iso-configurator
+ # dry runs working outside the ISO.
+ OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
+@@ -9,13 +9,8 @@ OMARCHY_SETTINGS_PACKAGE="${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings}"
+ 
+ LOGO_PATH="$OMARCHY_PATH/logo.txt"
+ 
+-# The setup form — keyboard, account, hostname, and timezone questions, plus the
+-# rules their answers are checked against — shared verbatim with the first-boot
+-# owner setup that finishes a deferred install. build-iso.sh vendors it out of
+-# the runtime package this ISO bundles, so the two can never offer different
+-# layouts or accept different usernames. On the ISO that vendored copy is what
+-# loads; a dry run outside the ISO falls back to the omarchy checkout
+-# bin/omarchy-iso-configurator already points OMARCHY_PATH at.
++# Vendor the keyboard, hostname and timezone prompts from the pinned runtime.
++# Account and deferred-owner prompts are not used in this installation.
+ SETUP_FORM="${SETUP_FORM:-/usr/share/omarchy-iso/setup-form.sh}"
+ [[ -r $SETUP_FORM ]] || SETUP_FORM="$OMARCHY_PATH/install/provisioning/setup-form.sh"
+ if [[ ! -r $SETUP_FORM ]]; then
+@@ -178,7 +173,7 @@ greeter() {
+ abort() {
+   gum style "${1:-Aborted installation}"
+   echo
+-  gum style "You can retry later by running: ./.automated_script.sh"
++  gum style "Return to the installer menu to retry."
+   exit 1
+ }
+ 
+@@ -204,110 +199,55 @@ notice() {
+ # STEP 1: KEYBOARD LAYOUT
+ 
+ keyboard_form() {
+-  # Ctrl+C is the hidden entry into deferred provisioning, offered on every
+-  # visit: the user step unwinds back here and nothing is on disk yet. Callers
+-  # re-check defer_provisioning after this returns.
+   local status
+-
+   while true; do
+-    clear_logo
+-    echo
+-    say "Let's setup your machine..."
+-    say --foreground 8 "Press Ctrl+C to prepare this machine for another owner."
+-    echo
+-
++    step "Choose the keyboard layout"
+     omarchy_prompt_keyboard && status=0 || status=$?
+     ((status == 0)) && break
+-
+-    # Esc means "back", and nothing precedes the first screen, so re-ask.
+     ((status == OMARCHY_FORM_BACK)) && continue
+-
+-    if ((status == OMARCHY_FORM_SIGNAL)); then
+-      if confirm_prepare_for_another_owner; then
+-        defer_provisioning=true
+-        return 0
+-      fi
+-      continue # declined: back to the keyboard picker
+-    fi
+     abort
+   done
+-
+-  # Only attempt to load keyboard layout if we're on a real console
+-  # loadkeys only works on Linux virtual consoles (tty), not in terminal emulators
+   if [[ $(tty 2>/dev/null) == "/dev/tty"* ]]; then
+     loadkeys "$keyboard" 2>/dev/null
+   fi
+ }
+ 
+-# Ctrl+C on the first screen offers to prepare the machine for another owner.
+-# Confirm it before committing, so an accidental Ctrl+C doesn't silently switch
+-# the whole install.
+-confirm_prepare_for_another_owner() {
+-  clear_logo
+-  echo
+-  say "This prepares the machine for another owner."
+-  say --foreground 8 "The system installs now, but setup is delayed until first boot."
+-  echo
+-  gum confirm --affirmative "Yes, prepare for another owner" --negative "No, keep setting up" \
+-    "Prepare this machine for another owner?"
+-}
+-
+-# The user step. Deferred-provisioning installs skip it entirely — the machine's first owner
+-# picks their keyboard and creates their user in the first-boot setup, so the
+-# operator sets nothing user-specific.
+-
+-user_form() {
+-  step "Let's setup your user account..."
+-
+-  # Each prompt reports 0 (set), OMARCHY_FORM_BACK (Esc), or OMARCHY_FORM_SIGNAL
+-  # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they
+-  # mean here; the form itself never aborts.
+-  omarchy_prompt_username || return $?
+-  omarchy_prompt_password || return $?
+-
+-  # Hash the password with SHA-512 crypt ($6$), which is what openssl passwd offers
+-  password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
+-
+-  omarchy_prompt_identity || return $?
+-  omarchy_prompt_hostname || return $?
+-  omarchy_prompt_timezone || return $?
+-}
+-
+-# Returns 0 on confirmed account details, or as soon as the keyboard screen
+-# arms deferred provisioning.
+-user_step() {
++machine_form() {
+   local status
+-
+   while true; do
+-    user_form && status=0 || status=$?
++    step "Configure the machine"
++    omarchy_prompt_hostname && status=0 || status=$?
+     if ((status != 0)); then
+-      # Esc unwinds to the start of the form. Ctrl+C has no side channel in the
+-      # user step (only the keyboard and disk screens give it a meaning), so it
+-      # keeps its long-standing behaviour of ending the install.
+       ((status == OMARCHY_FORM_BACK)) || abort
+       keyboard_form
+-      $defer_provisioning && return 0
+       continue
+     fi
+-
+-    # Add manual padding since gum table -p doesn't respect padding
+-    echo -e "Field,Value
+-Username,$username
+-Password,$(printf "%${#password}s" | tr ' ' '*')
+-Full name,${full_name:-[Skipped]}
+-Email address,${email_address:-[Skipped]}
+-Hostname,$hostname
+-Timezone,$timezone
+-Keyboard,$keyboard" |
++    omarchy_prompt_timezone && status=0 || status=$?
++    if ((status != 0)); then
++      ((status == OMARCHY_FORM_BACK)) || abort
++      continue
++    fi
++    printf 'Field,Value\nHostname,%s\nTimezone,%s\nKeyboard,%s\n' "$hostname" "$timezone" "$keyboard" |
+       gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
++    gum confirm --negative "No, change it" "Does this look right?" && return
++  done
++}
+ 
+-    echo
+-    if gum confirm --negative "No, change it" "Does this look right?"; then
+-      break
+-    else
+-      keyboard_form
+-      $defer_provisioning && return 0
++# Disk encryption is independent of login. This secret is only passed to LUKS;
++# it never becomes a root/user password or a credential for a local account.
++disk_encryption_form() {
++  password=""
++  [[ $encrypt_installation == true ]] || return 0
++  local confirmation
++  step "Choose the disk encryption passphrase"
++  say "This unlocks the disk at boot. No login account will be created."
++  while true; do
++    password=$(gum input --password --prompt "Disk passphrase> ") || abort
++    confirmation=$(gum input --password --prompt "Confirm disk passphrase> ") || abort
++    if [[ -n $password && $password == "$confirmation" ]]; then
++      return 0
+     fi
++    notice "Enter a non-empty, matching disk passphrase." 1
+   done
+ }
+ 
+@@ -435,48 +375,18 @@ disk_abort_hook() {
+   abort "$1"
+ }
+ 
+-# Save the configurator answers the installer consumes: git identity and
+-# encryption choice as plain files, account details as archinstall credentials.
+-# Deferred-provisioning installs defer the user to first boot: no credentials, and on encrypted
+-# targets the orchestrator generates a throwaway LUKS passphrase itself.
++# Compatibility files contain no account identity or account password.
+ write_user_files() {
+-  echo "$full_name" >user_full_name.txt
+-  echo "$email_address" >user_email_address.txt
++  : >user_full_name.txt
++  : >user_email_address.txt
+   printf '%s\n' "$encrypt_installation" >user_encrypt_installation.txt
+-
+-  if $defer_provisioning; then
+-    cat <<-_EOF_ >user_credentials.json
+-{
+-    "users": []
+-}
+-_EOF_
+-    return
+-  fi
+-
+-  local password_escaped password_hash_escaped username_escaped
+-  password_escaped=$(echo -n "$password" | jq -Rsa)
+-  password_hash_escaped=$(echo -n "$password_hash" | jq -Rsa)
+-  username_escaped=$(echo -n "$username" | jq -Rsa)
+-
+-  local credentials_encryption_line=""
+   if [[ $encrypt_installation == true ]]; then
+-    credentials_encryption_line="    \"encryption_password\": $password_escaped,"
++    # Read the passphrase on stdin, never expose it in process arguments.
++    printf '%s' "$password" | jq -Rs '{users: [], encryption_password: .}' >user_credentials.json
++  else
++    printf '%s\n' '{"users": []}' >user_credentials.json
+   fi
+-
+-  cat <<-_EOF_ >user_credentials.json
+-{
+-$credentials_encryption_line
+-    "root_enc_password": $password_hash_escaped,
+-    "users": [
+-        {
+-            "enc_password": $password_hash_escaped,
+-            "groups": [],
+-            "sudo": true,
+-            "username": $username_escaped
+-        }
+-    ]
+-}
+-_EOF_
++  chmod 600 user_credentials.json
+ }
+ 
+ # Show what a dry run would have written, then leave no trace behind.
+@@ -679,8 +589,7 @@ run_partition_decide() {
+ }
+ 
+ # Execute half of the free-space install: partition, format, mount, and write
+-# the pre-mounted (protected) install configuration. Runs after the user step
+-# so LUKS can be formatted with the user's password.
++# the pre-mounted (protected) install configuration using the disk passphrase.
+ run_partition_execute() {
+   local dry=false subvol
+   [[ "${1:-}" == "dry" ]] && dry=true
+@@ -801,6 +710,8 @@ run_partition_execute() {
+     "custom_commands": [],
+     "omarchy_install": {
+         "mode": "protected",
++        "no_accounts": true,
++        "defer_provisioning": false,
+         "target_mount": "/mnt",
+         "boot": {
+             "esp_mount": "$esp_mount_in_target",
+@@ -986,9 +897,7 @@ confirm_disk_overwrite() {
+ 
+ # Decide what and how to install: sets install_target (full_disk|free_space),
+ # install_target and encrypt_installation. Nothing is written to disk yet —
+-# the user step runs between this and the execution below. (deferred provisioning never
+-# reaches here; it's armed by Ctrl+C on the keyboard screen and goes straight to
+-# disk selection.)
++# the disk passphrase is collected before execution if encryption is selected.
+ select_installation() {
+   local full_disk_only
+ 
+@@ -1030,53 +939,15 @@ select_installation() {
+   done
+ }
+ 
+-# STEP 1: KEYBOARD (Ctrl+C here arms deferred provisioning and jumps to disk selection)
+-
+-defer_provisioning=false
++# Choose machine settings and a disk; no account or first-boot owner setup.
+ install_target="full_disk"
+-
+-# Let the live VT reach its settled width before the first screen so the logo
+-# isn't measured against the transient 80-column boot console.
+ wait_for_stable_terminal
+-
+ greeter
+-
+ keyboard_form
+-
+-# Normal install: keyboard (loaded above, so the LUKS passphrase is typed under
+-# the right layout) → user → disk → install mode. The user step can unwind to
+-# the keyboard screen and arm deferral there, hence the second check.
+-if ! $defer_provisioning; then
+-  user_step
+-fi
+-
+-if $defer_provisioning; then
+-  # Deferred provisioning: no user setup, and the keyboard is deferred to the machine's first
+-  # boot. A defined default keymap so it boots before then; the owner picks
+-  # their real layout in the OOBE, which re-keys the console and, on encrypted
+-  # installs, rebuilds the initramfs so the LUKS prompt matches.
+-  keyboard="us"
+-  username=""
+-  password=""
+-  password_hash=""
+-  full_name=""
+-  email_address=""
+-  # Neutral defaults for the install; the owner overwrites both in the
+-  # first-boot OOBE (omarchy-provision-owner).
+-  hostname="omarchy"
+-  timezone="UTC"
+-
+-  # Jump straight to disk selection + overwrite confirmation (encrypted by
+-  # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.
+-  disk_form
+-  until confirm_disk_overwrite; do
+-    disk_form
+-  done
+-  install_target="full_disk"
+-else
+-  disk_form
+-  select_installation
+-fi
++machine_form
++disk_form
++select_installation
++disk_encryption_form
+ 
+ clear
+ 
+@@ -1107,14 +978,8 @@ main_partition_size=$((disk_size_in_mib - main_partition_start - gpt_backup_rese
+ kernel_choice=$(detect_kernel)
+ 
+ if [[ $encrypt_installation == true ]]; then
+-  # Deferred-provisioning installs carry no password: the orchestrator generates a throwaway
+-  # LUKS passphrase and stages it for the first-boot re-key.
+-  if $defer_provisioning; then
+-    encryption_password_line=""
+-  else
+-    encryption_password_line=",
+-            \"encryption_password\": $(echo -n "$password" | jq -Rsa)"
+-  fi
++  encryption_password_line=",
++            \"encryption_password\": $(printf '%s' "$password" | jq -Rsa)"
+   disk_encryption_config=$(cat <<-_EOF_
+ ,
+         "disk_encryption": {
+@@ -1139,7 +1004,8 @@ cat <<-_EOF_ >user_configuration.json
+     "custom_commands": [],
+     "omarchy_install": {
+         "mode": "full_disk",
+-        "defer_provisioning": $defer_provisioning,
++        "no_accounts": true,
++        "defer_provisioning": false,
+         "target_mount": "/mnt",
+         "boot": {
+             "esp_mount": "/boot",
+@@ -1249,6 +1115,6 @@ cat <<-_EOF_ >user_configuration.json
+ }
+ _EOF_
+ 
+-if [[ $1 == "dry" ]]; then
++if [[ ${1:-} == "dry" ]]; then
+   print_dry_run_files
+ fi
